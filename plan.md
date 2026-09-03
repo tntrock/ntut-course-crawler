@@ -531,10 +531,11 @@ jobs:
 
 | # | 問題 | 影響 | 建議處理時機 |
 |---|---|---|---|
-| 3 | `truststore` 在 GitHub Actions(Linux + Python 3.12)是否需要 / 是否反而出錯 | workflow 可能整個跑不起來 | Phase 5 第一次手動觸發時。**已預先降低風險**:`http.py` 的注入做成「盡力而為」,失敗只記 warning 不中斷,並可用 `NTUT_DISABLE_TRUSTSTORE=1` 停用 |
 | 4 | 學年度 / 學期的有效範圍,以及舊學年頁面結構是否相同 | 影響歷年回補 | 未來擴充時,不影響 MVP。已知系統首頁同時提供 115-1 與 114-2 兩個學期的入口 |
 
 ### 已解決
+
+- ~~`truststore` 在 GitHub Actions(Linux + Python 3.12)是否需要 / 是否反而出錯~~ → 2026-09-03 第一次 `workflow_dispatch` 冒煙測試(run 33756114153,`dept=59`)確認:Linux + Python 3.12.14 上 `truststore` 正常注入,7 次請求全部成功,log 沒有任何 SSL 或注入失敗的 warning,結果與本機完全一致(53 門課)。無需特別處理。
 
 - ~~進修部 / 研究所在職專班課程是否在同一個 `format=-2` 樹裡~~ → 2026-09-03 以兩次實地請求確認(`scripts/recon3.py`):
   1. 系統首頁 `course.jsp` 每個學期**只提供一個「上課時間表」入口**,就是 `Subj.jsp?format=-2`,沒有另一個進修部入口。
