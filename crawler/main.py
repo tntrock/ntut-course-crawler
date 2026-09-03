@@ -38,6 +38,15 @@ HOME_PAGE = "course.jsp"
 #: 每 4 小時全部重抓一次只是白白增加學校的負擔。
 DEFAULT_REFRESH_AFTER = 24.0
 
+#: 連續幾個學期「整個抓不到」就中止本批。
+#:
+#: 實測遇過:2026-09-03 18:00-18:18 UTC 這 18 分鐘 GitHub runner 完全連不到
+#: 學校(TCP connect timeout,本機同時是通的),一批 12 個學期全部失敗,
+#: 花了 11.5 分鐘在對一台連不上的機器反覆重試。單一學期失敗可能只是那頁有問題,
+#: 但連續失敗幾乎一定是對方整體不可用 —— 這時候繼續試沒有意義,也不禮貌。
+#: 中止不影響已抓好的學期(它們早就落地了),失敗的下次執行會自動重試。
+CONSECUTIVE_FAILURE_LIMIT = 3
+
 
 # --------------------------------------------------------------------------
 # 抓取
@@ -377,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[CrawlResult] = []
     failed: list[Semester] = []
+    consecutive_failures = 0
 
     for semester, reason in targets:
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
@@ -393,7 +403,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.out, semester.year, semester.sem, exc, pretty=args.pretty
             )
             failed.append(semester)
+
+            consecutive_failures += 1
+            if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
+                log.error(
+                    "連續 %d 個學期整個抓不到,判定學校端目前不可用,中止本批。"
+                    "已抓好的學期不受影響,失敗的下次執行會自動重試。",
+                    consecutive_failures,
+                )
+                break
             continue
+
+        consecutive_failures = 0
 
         if not result.departments:
             # 太舊的學年期總覽頁是空的(實測 80-1 以前)。寫出去只會多一個

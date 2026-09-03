@@ -12,6 +12,7 @@ import pytest
 
 from crawler.config import SCHEMA_VERSION
 from crawler.main import (
+    CONSECUTIVE_FAILURE_LIMIT,
     backfill_semesters,
     crawl,
     discover_semesters,
@@ -557,3 +558,43 @@ class TestSemesterLevelFaultTolerance:
         code = main(["--years", "114", "--out", str(tmp_path),
                      "--dept", "59", "--log-level", "CRITICAL"])
         assert code == 1
+
+
+class TestConsecutiveFailureCircuitBreaker:
+    """對方整體不可用時要早點收手,不要對著連不上的機器重試整批。
+
+    實測:2026-09-03 18:00-18:18 UTC,GitHub runner 完全連不到學校
+    (本機同時是通的),一批 12 個學期全滅,花了 11.5 分鐘在重試。
+    """
+
+    def test_stops_after_three_consecutive_failures(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {
+            (114, 2), (114, 1), (113, 2), (113, 1), (112, 2), (112, 1),
+        }
+        code = main(["--years", "112-114", "--out", str(tmp_path),
+                     "--dept", "59", "--log-level", "CRITICAL"])
+        assert code == 1
+
+        # 只該試到第 3 個就停,不是全部 6 個
+        errors = json.loads((tmp_path / "errors.json").read_text(encoding="utf-8"))
+        attempted = {(e["year"], e["sem"]) for e in errors["errors"]}
+        assert len(attempted) == CONSECUTIVE_FAILURE_LIMIT
+        assert attempted == {(114, 2), (114, 1), (113, 2)}
+
+    def test_a_success_resets_the_counter(self, tmp_path, fake_fetcher_factory):
+        """散落的失敗不該被誤判成「對方掛了」。"""
+        fake_fetcher_factory.fail_semesters = {(114, 2), (113, 2), (112, 2)}
+        code = main(["--years", "112-114", "--out", str(tmp_path),
+                     "--dept", "59", "--log-level", "CRITICAL"])
+        assert code == 0
+        # 中間夾著成功,計數器歸零,所以 6 個學期全部都試過了
+        for path in ("114-1", "113-1", "112-1"):
+            assert (tmp_path / path).is_dir()
+
+    def test_already_crawled_semesters_survive_an_abort(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(113, 2), (113, 1), (112, 2)}
+        main(["--years", "112-114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "CRITICAL"])
+        # 中止前抓好的 114-2 / 114-1 要留著
+        assert (tmp_path / "114-2").is_dir() and (tmp_path / "114-1").is_dir()
+        assert not (tmp_path / "112-1").exists()   # 中止後的沒去碰
