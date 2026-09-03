@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# fixtures 必須逐位元組保持與學校伺服器回傳一致,不做任何換行轉換
+tests/fixtures/** -text
