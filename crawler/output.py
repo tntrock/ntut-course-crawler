@@ -607,6 +607,53 @@ def _unique(values: Iterable[str]) -> list[str]:
     return seen
 
 
+def write_semester_failure(
+    out_dir: Path,
+    year: int,
+    sem: int,
+    error: BaseException,
+    *,
+    pretty: bool = False,
+) -> None:
+    """整個學期抓不動時,把失敗記進 errors.json。
+
+    **刻意不碰 meta.json** —— 在那裡留下紀錄會讓下次執行以為這學期抓過了,
+    於是永遠不會重試。errors.json 是「這次發生什麼事」,meta.json 是
+    「我手上有什麼資料」,兩者不能混。
+
+    下次同一個學期抓成功時,`_write_errors` 會依 (year, sem) 換掉這筆。
+    """
+    path = Path(out_dir) / "errors.json"
+    existing = _read_json(path) or {}
+    kept = [
+        entry
+        for entry in existing.get("errors", [])
+        if isinstance(entry.get("year"), int)
+        and isinstance(entry.get("sem"), int)
+        and (entry["year"], entry["sem"]) != (year, sem)
+    ]
+    kept.append(
+        {
+            "year": year,
+            "sem": sem,
+            "stage": "semester",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    )
+    _write_json(
+        path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "year": year,
+            "sem": sem,
+            "error_count": len(kept),
+            "errors": kept,
+        },
+        pretty,
+    )
+
+
 def read_semester_times(out_dir: Path) -> dict[tuple[int, int], datetime]:
     """讀既有的 meta.json,回傳每個學年期上次產生的時間(UTC)。
 

@@ -27,8 +27,15 @@ from tests.conftest import load_fixture
 class FakeFetcher:
     """依 format / code 回傳對應 fixture 的假抓取器。"""
 
-    def __init__(self, *, fail_on: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on: set[str] | None = None,
+        fail_semesters: set[tuple[int, int]] | None = None,
+    ) -> None:
         self.fail_on = fail_on or set()
+        # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
+        self.fail_semesters = fail_semesters or set()
         self.calls: list[tuple[int, str | None]] = []
         self.request_count = 0
         self.cache_hit_count = 0
@@ -43,6 +50,10 @@ class FakeFetcher:
 
         if code in self.fail_on:
             raise RuntimeError(f"模擬 {code} 抓取失敗")
+
+        key = (params.get("year"), params.get("sem"))
+        if key in self.fail_semesters:
+            raise TimeoutError(f"模擬 {key[0]}-{key[1]} 連線逾時")
 
         if url == "course.jsp":
             # 首頁列出 115-1 與 114-2 兩個學年期
@@ -73,10 +84,13 @@ def fake_fetcher_factory(monkeypatch):
     class Factory:
         def __init__(self) -> None:
             self.fail_on: set[str] = set()
+            self.fail_semesters: set[tuple[int, int]] = set()
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
-            fetcher = FakeFetcher(fail_on=self.fail_on)
+            fetcher = FakeFetcher(
+                fail_on=self.fail_on, fail_semesters=self.fail_semesters
+            )
             self.created.append(fetcher)
             return fetcher
 
@@ -474,3 +488,72 @@ class TestBackfillCli:
         fetcher = fake_fetcher_factory.created[0]
         assert (0, None) not in fetcher.calls
         assert (tmp_path / "115-2").is_dir()
+
+
+class TestSemesterLevelFaultTolerance:
+    """一個學期抓不到,不可以賠掉同一批其他學期的成果。
+
+    實測踩過:回補第一批的 114-1 總覽頁連線逾時(台灣時間 02:01,
+    疑似學校深夜維護),例外一路往上炸掉整個執行,workflow 的
+    Publish 步驟因而被跳過 —— 那批就算已經抓完 11 個學期也全部白做。
+    """
+
+    def read(self, path):
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_other_semesters_still_get_written(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(114, 1)}
+        code = main([
+            "--years", "114", "--out", str(tmp_path),
+            "--dept", "59", "--log-level", "ERROR",
+        ])
+        assert code == 0                       # 有成果就要讓它發布
+        assert (tmp_path / "114-2").is_dir()   # 另一個學期照樣寫出來
+        assert not (tmp_path / "114-1").exists()
+
+    def test_failure_is_recorded_in_errors_json(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(114, 1)}
+        main(["--years", "114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "ERROR"])
+
+        errors = self.read(tmp_path / "errors.json")["errors"]
+        entry = next(e for e in errors if (e["year"], e["sem"]) == (114, 1))
+        assert entry["stage"] == "semester"
+        assert "TimeoutError" in entry["error"]
+
+    def test_failed_semester_is_not_recorded_in_meta(self, tmp_path, fake_fetcher_factory):
+        """meta.json 是「我有什麼資料」。留紀錄會讓下次以為抓過了,永不重試。"""
+        fake_fetcher_factory.fail_semesters = {(114, 1)}
+        main(["--years", "114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "ERROR"])
+
+        meta = self.read(tmp_path / "meta.json")
+        assert [s["path"] for s in meta["semesters"]] == ["114-2"]
+
+    def test_failed_semester_is_retried_next_time(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(114, 1)}
+        main(["--years", "114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "ERROR"])
+
+        # 兩個學期都會被列出:114-1 是因為抓失敗沒留下資料,114-2 是因為
+        # 這裡用 --dept,結果標了 partial(不完整的資料不算數)。
+        # 重點是 114-1 沒有被 errors.json 的失敗紀錄擋掉。
+        retry = [s.path for s, _ in backfill_semesters((114, 114), tmp_path)]
+        assert "114-1" in retry
+
+    def test_a_later_success_clears_the_error(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(114, 1)}
+        main(["--years", "114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "ERROR"])
+        assert self.read(tmp_path / "errors.json")["error_count"] == 1
+
+        fake_fetcher_factory.fail_semesters = set()
+        main(["--years", "114", "--out", str(tmp_path),
+              "--dept", "59", "--log-level", "ERROR"])
+        assert self.read(tmp_path / "errors.json")["errors"] == []
+
+    def test_every_semester_failing_is_a_real_failure(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.fail_semesters = {(114, 1), (114, 2)}
+        code = main(["--years", "114", "--out", str(tmp_path),
+                     "--dept", "59", "--log-level", "CRITICAL"])
+        assert code == 1

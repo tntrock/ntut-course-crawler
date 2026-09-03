@@ -24,7 +24,7 @@ from typing import Any
 
 from .http import Fetcher
 from .models import ClassGroup, Course, Department, Semester
-from .output import read_semester_times, write_outputs
+from .output import read_semester_times, write_outputs, write_semester_failure
 from .parse_course import parse_courses
 from .parse_dept import parse_class_groups, parse_colleges
 from .parse_semester import parse_semesters
@@ -376,11 +376,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     results: list[CrawlResult] = []
+    failed: list[Semester] = []
+
     for semester, reason in targets:
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
-        result = crawl(
-            fetcher, semester.year, semester.sem, only_departments=args.dept
-        )
+        try:
+            result = crawl(
+                fetcher, semester.year, semester.sem, only_departments=args.dept
+            )
+        except Exception as exc:
+            # 學期層級的容錯。總覽頁抓不到(學校維護、連線逾時)時,原本會
+            # 一路往上炸掉整個執行 —— 一批 12 個學期跑到第 8 個掛掉,
+            # 前 7 個的成果就因為步驟失敗而不會被發布。記錄後換下一個學期。
+            log.error("%s 整個學期抓取失敗:%s", semester.path, exc)
+            write_semester_failure(
+                args.out, semester.year, semester.sem, exc, pretty=args.pretty
+            )
+            failed.append(semester)
+            continue
+
         if not result.departments:
             # 太舊的學年期總覽頁是空的(實測 80-1 以前)。寫出去只會多一個
             # 空目錄,還會在 meta.json 留下「抓過了」的紀錄擋住之後的重試。
@@ -392,11 +406,23 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_summary(results, fetcher, args.out)
 
+    if failed:
+        log.warning(
+            "%d 個學期整個抓不到:%s(已記進 errors.json,下次執行會重試)",
+            len(failed),
+            ", ".join(s.path for s in failed),
+        )
+
     # 只有「某個學期的所有單位都失敗」才算整體失敗
     for result in results:
         if result.departments and result.ok_departments == 0:
             log.error("%s 的所有單位都抓取失敗", result.semester)
             return 1
+
+    # 一個學期都沒抓成功才算整體失敗;有部分成果就要讓它發布出去
+    if failed and not results:
+        log.error("所有指定的學期都抓取失敗")
+        return 1
     return 0
 
 
