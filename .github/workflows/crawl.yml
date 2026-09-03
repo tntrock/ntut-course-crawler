@@ -14,7 +14,7 @@ on:
         description: '學期 1 或 2(填了 year 才需要)'
         default: ''
       dept:
-        description: '只抓單一系所代碼(冒煙測試用;填了就不會發布到 gh-pages)'
+        description: '只抓單一系所代碼(冒煙測試用;填了就不會發布)'
         default: ''
       delay:
         description: '每次請求後的延遲秒數(下限 0.5)'
@@ -26,12 +26,16 @@ on:
         description: '強制重抓首頁列出的每個學年期'
         type: boolean
         default: false
+      rebuild:
+        description: '整包重建:撈回全部歷史資料後用 force_orphan 重發布(清幽靈檔並壓掉 gh-pages 歷史)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 # 同時只跑一個 crawl。兩個 job 一起抓等於對學校併發請求,
-# 那正是 plan.md §1.4 要避免的事。
+# 那正是 plan.md §1.4 要避免的事。回補共用同一個群組(見 backfill.yml)。
 concurrency:
   group: crawl
   cancel-in-progress: false
@@ -55,20 +59,37 @@ jobs:
       - name: Test
         run: pytest -q
 
-      # 發布用的是 force_orphan(不留歷史),所以 data/ 每次都是空的。
-      # 不先把上次的成果撈回來的話:
-      #   1. meta.json / index.json 沒有舊學期可合併,歷史學期會整個消失
-      #   2. 判斷不出「這學期上次是什麼時候抓的」,--refresh-after 形同虛設
-      - name: Restore previously published data
+      # 只撈三個跨學期的檔案,不是整包 —— 理由見 restore-note.md。
+      # --sparse 只 checkout 根目錄下的檔案,正好就是這三個;歷史學期的
+      # 幾千個檔連 blob 都不會下載。發布用 keep_files,它們也不必在本機出現。
+      - name: Restore shared index files
+        if: ${{ !inputs.rebuild }}
         run: |
-          if git clone --depth 1 --branch gh-pages --quiet \
-              "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+          mkdir -p data
+          if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            for f in meta.json index.json errors.json; do
+              if [ -f ".gh-pages/$f" ]; then
+                cp ".gh-pages/$f" "data/$f"
+                echo "已還原 $f($(stat -c%s "data/$f") bytes)"
+              else
+                echo "gh-pages 上還沒有 $f"
+              fi
+            done
+          else
+            echo "gh-pages 還不存在(第一次跑),從零開始"
+          fi
+
+      # rebuild 模式要整包比對,才有辦法把消失的班級 / 教師留下的幽靈檔清掉
+      - name: Restore everything (rebuild)
+        if: ${{ inputs.rebuild }}
+        run: |
+          if git clone --depth 1 --branch gh-pages --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
             mkdir -p data
             cp -r .gh-pages/. data/
             rm -rf data/.git
-            echo "已載回前一次發布的資料:$(ls data | tr '\n' ' ')"
+            echo "已載回整包:$(find data -type f | wc -l) 個檔案"
           else
-            echo "gh-pages 還不存在(第一次跑),從零開始"
+            echo "gh-pages 還不存在,rebuild 等同一般發布"
           fi
 
       # 參數一律走環境變數,不直接把 inputs 內插進 shell —— 那是 script injection。
@@ -93,7 +114,6 @@ jobs:
           fi
           python -m crawler.main "${args[@]}"
 
-      # 不論成功失敗都留一份,方便事後檢查
       - name: Upload data as artifact
         if: always()
         uses: actions/upload-artifact@v7
@@ -102,11 +122,21 @@ jobs:
           path: data/
           retention-days: 7
 
-      # 只抓單一系所時資料是不完整的,不可以蓋掉線上的完整資料集
+      # 平常只推當期的資料,歷史學期靠 keep_files 留在分支上不動。
+      # 代價是班級 / 教師消失時遠端會留下幽靈檔 —— 那由 rebuild 模式清。
       - name: Publish to gh-pages
-        if: ${{ !inputs.dept }}
+        if: ${{ !inputs.dept && !inputs.rebuild }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./data
-          force_orphan: true    # 不保留歷史,避免 repo 無限膨脹
+          keep_files: true
+
+      # 整包重發:順便把 gh-pages 的 commit 歷史壓成一個,避免 repo 無限膨脹
+      - name: Publish to gh-pages (rebuild)
+        if: ${{ !inputs.dept && inputs.rebuild }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          force_orphan: true

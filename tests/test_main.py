@@ -12,9 +12,11 @@ import pytest
 
 from crawler.config import SCHEMA_VERSION
 from crawler.main import (
+    backfill_semesters,
     crawl,
     discover_semesters,
     main,
+    parse_year_range,
     select_semesters,
     write_outputs,
 )
@@ -395,3 +397,80 @@ class TestAutoModeCli:
     def test_year_without_sem_is_rejected(self, tmp_path):
         with pytest.raises(SystemExit):
             main(["--year", "115", "--out", str(tmp_path)])
+
+
+# --------------------------------------------------------------------------
+# 回補歷史學期
+# --------------------------------------------------------------------------
+class TestParseYearRange:
+    def test_range(self):
+        assert parse_year_range("90-114") == (90, 114)
+
+    def test_single_year(self):
+        assert parse_year_range("113") == (113, 113)
+
+    def test_reversed_range_is_normalised(self):
+        assert parse_year_range("114-90") == (90, 114)
+
+    def test_whitespace_is_tolerated(self):
+        assert parse_year_range("  90-114  ") == (90, 114)
+
+    def test_garbage_raises_with_a_useful_message(self):
+        with pytest.raises(ValueError, match="--years 看不懂"):
+            parse_year_range("民國九十年")
+
+
+class TestBackfillSemesters:
+    def test_newest_first_and_both_semesters(self, tmp_path):
+        picked = [s for s, _ in backfill_semesters((112, 113), tmp_path)]
+        assert [s.path for s in picked] == ["113-2", "113-1", "112-2", "112-1"]
+
+    def test_already_crawled_semesters_are_skipped_regardless_of_age(self, tmp_path):
+        """過去的學期不會再變,抓過就永久跳過 —— 這讓回補可以分批續跑。"""
+        write_meta(tmp_path, [{"year": 113, "sem": 1, "generated_at": stamp(9999)}])
+        picked = [s.path for s, _ in backfill_semesters((113, 113), tmp_path)]
+        assert picked == ["113-2"]
+
+    def test_partial_data_does_not_block_a_backfill(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 113, "sem": 1, "generated_at": stamp(1), "partial": True},
+        ])
+        picked = [s.path for s, _ in backfill_semesters((113, 113), tmp_path)]
+        assert picked == ["113-2", "113-1"]
+
+    def test_limit_splits_the_work_into_batches(self, tmp_path):
+        picked = [s.path for s, _ in backfill_semesters((90, 114), tmp_path, limit=3)]
+        assert picked == ["114-2", "114-1", "113-2"]
+
+    def test_force_all_reruns_even_crawled_semesters(self, tmp_path):
+        write_meta(tmp_path, [{"year": 113, "sem": 1, "generated_at": stamp(1)}])
+        picked = [s.path for s, _ in backfill_semesters((113, 113), tmp_path, force_all=True)]
+        assert picked == ["113-2", "113-1"]
+
+    def test_nothing_left_to_do(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 113, "sem": 1, "generated_at": stamp(1)},
+            {"year": 113, "sem": 2, "generated_at": stamp(1)},
+        ])
+        assert backfill_semesters((113, 113), tmp_path) == []
+
+
+class TestBackfillCli:
+    def test_years_and_year_are_mutually_exclusive(self, tmp_path):
+        with pytest.raises(SystemExit):
+            main(["--years", "90-114", "--year", "113", "--sem", "1",
+                  "--out", str(tmp_path)])
+
+    def test_bad_year_range_is_rejected_before_any_request(self, tmp_path):
+        with pytest.raises(SystemExit):
+            main(["--years", "亂寫", "--out", str(tmp_path)])
+
+    def test_backfill_does_not_read_the_home_page(self, tmp_path, fake_fetcher_factory):
+        code = main([
+            "--years", "115", "--max-semesters", "1",
+            "--out", str(tmp_path), "--dept", "59", "--log-level", "ERROR",
+        ])
+        assert code == 0
+        fetcher = fake_fetcher_factory.created[0]
+        assert (0, None) not in fetcher.calls
+        assert (tmp_path / "115-2").is_dir()

@@ -123,6 +123,58 @@ def select_semesters(
     return picked
 
 
+def parse_year_range(text: str) -> tuple[int, int]:
+    """把 `--years` 的值解析成 (最舊, 最新) 學年度。
+
+    接受 `90-114`(範圍)或 `113`(單一學年度)。
+    """
+    text = text.strip()
+    if "-" in text:
+        low, _, high = text.partition("-")
+    else:
+        low = high = text
+    try:
+        start, end = int(low), int(high)
+    except ValueError:
+        raise ValueError(f"--years 看不懂:{text!r},格式應為 90-114 或 113") from None
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def backfill_semesters(
+    years: tuple[int, int],
+    out_dir: Path,
+    *,
+    force_all: bool = False,
+    limit: int | None = None,
+) -> list[tuple[Semester, str]]:
+    """回補:列出指定學年度範圍內、還沒抓過的學期,由新到舊。
+
+    首頁只掛最近兩個學期,但 `Subj.jsp?format=-2&year=&sem=` 不理會首頁 ——
+    實測 90 學年度起的資料都還在,而且版面與現在完全相同(23 欄、教師與
+    教室一樣是帶 code 的連結),現有解析器直接吃得下。
+
+    **已經有完整資料的學期永久跳過**,不看新舊。過去的學期不會再變動,
+    重抓沒有意義;而且這讓回補可以分批跑,中途失敗再跑一次就會接續下去。
+    `--all-semesters` 可以強制重抓。
+    """
+    known = read_semester_times(out_dir)
+    start, end = years
+    picked: list[tuple[Semester, str]] = []
+
+    for year in range(end, start - 1, -1):
+        for sem in (2, 1):  # 同一學年度裡第 2 學期比較新
+            if not force_all and (year, sem) in known:
+                continue
+            picked.append((Semester(year=year, sem=sem), "回補"))
+            if limit is not None and len(picked) >= limit:
+                log.info("已達 --max-semesters 上限 %d,其餘留給下一批", limit)
+                return picked
+
+    return picked
+
+
 def crawl(
     fetcher: Fetcher,
     year: int,
@@ -253,6 +305,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="只抓指定系所代碼(可重複),開發用。例:--dept 59",
     )
     parser.add_argument(
+        "--years",
+        metavar="FROM-TO",
+        help="回補模式:抓這個學年度範圍內尚未抓過的學期,例 --years 90-114",
+    )
+    parser.add_argument(
+        "--max-semesters",
+        type=int,
+        default=None,
+        metavar="N",
+        help="這次最多抓幾個學期(回補分批用,避開 Actions 單 job 6 小時上限)",
+    )
+    parser.add_argument(
         "--refresh-after",
         type=float,
         default=DEFAULT_REFRESH_AFTER,
@@ -290,6 +354,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if (args.year is None) != (args.sem is None):
         parser.error("--year 與 --sem 要嘛一起給,要嘛都不給(自動偵測)")
+    if args.years and args.year is not None:
+        parser.error("--years(回補範圍)與 --year/--sem(單一學期)只能擇一")
+    if args.years:
+        try:
+            parse_year_range(args.years)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     fetcher = Fetcher(delay=args.delay, use_cache=not args.no_cache)
     log.info("延遲 %.2fs / 快取 %s", fetcher.delay, "關閉" if args.no_cache else "開啟")
@@ -310,6 +381,11 @@ def main(argv: list[str] | None = None) -> int:
         result = crawl(
             fetcher, semester.year, semester.sem, only_departments=args.dept
         )
+        if not result.departments:
+            # 太舊的學年期總覽頁是空的(實測 80-1 以前)。寫出去只會多一個
+            # 空目錄,還會在 meta.json 留下「抓過了」的紀錄擋住之後的重試。
+            log.warning("%s 沒有任何單位,略過不輸出", semester.path)
+            continue
         # 每抓完一個學期就落地,後面的學期失敗也不會賠掉前面的成果
         write_outputs(result, args.out, pretty=args.pretty)
         results.append(result)
@@ -325,6 +401,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _targets(args: argparse.Namespace, fetcher: Fetcher) -> list[tuple[Semester, str]]:
+    if args.years:
+        targets = backfill_semesters(
+            parse_year_range(args.years),
+            args.out,
+            force_all=args.all_semesters,
+            limit=args.max_semesters,
+        )
+        log.info(
+            "回補 %s:本次要抓 %d 個學期:%s",
+            args.years,
+            len(targets),
+            ", ".join(s.path for s, _ in targets) or "(無,都抓過了)",
+        )
+        return targets
+
     if args.year is not None:
         return [(Semester(year=args.year, sem=args.sem), "命令列指定")]
 

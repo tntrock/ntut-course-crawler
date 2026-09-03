@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from .config import BASE_URL, SCHEMA_VERSION
+from .config import BASE_URL, INDEX_SEMESTERS, SCHEMA_VERSION
 from .models import Course, requirement_table
 from .periods import period_table
 
@@ -125,12 +125,17 @@ def _now() -> str:
 
 
 def _envelope(result: "CrawlResult") -> dict[str, Any]:
-    """每個學期層級檔案共用的頂層欄位。"""
+    """每個學期層級檔案共用的頂層欄位。
+
+    **刻意不放 `generated_at`**(schema v2 起)。放了的話每次跑完每個檔的
+    內容都會變,發布時等於整包重推 —— 有了 25 年的歷史資料之後,那是每天
+    好幾 GB 的無謂流量。時間戳集中在 meta.json 的 `semesters[]`,
+    粒度也更正確:一個學期的所有檔案本來就是同一次產生的。
+    """
     return {
         "schema_version": SCHEMA_VERSION,
         "year": result.year,
         "sem": result.sem,
-        "generated_at": _now(),
     }
 
 
@@ -460,7 +465,15 @@ def _write_semester_index(
 
 
 def _write_index(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
-    """跨學期的總索引。只替換本次學年期的部分,其他學期保留。"""
+    """跨學期的總索引。
+
+    **只涵蓋最新的 INDEX_SEMESTERS 個學期**(schema v2 起)。把 90 學年度
+    以來的每個學期都塞進來會膨脹到數十 MB,而且它每次跑都會重寫 ——
+    對一個每 4 小時發布一次的靜態站台來說代價太高。歷史學期請改查
+    `{semester}/index.json`,那些檔案抓過一次就不會再變。
+
+    `covers` 欄位明講這份索引涵蓋哪些學期,使用端不必自己猜。
+    """
     path = out_dir / "index.json"
     existing = _read_json(path) or {}
     kept = [
@@ -470,11 +483,22 @@ def _write_index(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
     ]
     courses = kept + [_index_entry(c, result.year, result.sem) for c in result.courses]
 
+    # 先算出合併後有哪些學期,取最新的幾個,其餘整批丟掉
+    present = {
+        (entry["year"], entry["sem"])
+        for entry in courses
+        if isinstance(entry.get("year"), int) and isinstance(entry.get("sem"), int)
+    }
+    covered = sorted(present, reverse=True)[:INDEX_SEMESTERS]
+    courses = [
+        entry for entry in courses if (entry.get("year"), entry.get("sem")) in set(covered)
+    ]
+
     _write_json(
         path,
         {
             "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
+            "covers": [f"{year}-{sem}" for year, sem in covered],
             "course_count": len(courses),
             "courses": courses,
         },

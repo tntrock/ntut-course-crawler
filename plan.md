@@ -152,7 +152,9 @@ ntut-course-crawler/
 │  └─ test_periods.py
 ├─ scripts/
 │  ├─ recon.py           # Phase 0 偵察腳本
-│  └─ recon2.py          # Phase 0 第二輪(真實系所)
+│  ├─ recon2.py          # Phase 0 第二輪(真實系所)
+│  ├─ recon3.py          # Phase 3 進修部確認
+│  └─ recon4.py          # Phase 8 歷史學年期可用性
 ├─ .gitignore
 ├─ requirements.txt
 └─ README.md
@@ -561,6 +563,80 @@ jobs:
   而且判斷不出「這學期上次何時抓的」,`--refresh-after` 形同虛設。
 - `workflow_dispatch` 的參數改走 `env:`,不直接內插進 shell(script injection)。
 
+
+---
+
+### Phase 8 — 歷史學期回補與 schema v2(已完成 2026-09-04)
+
+使用者問:「113 年或更早的,首頁沒顯示但資料應該還在,有辦法抓嗎?」
+
+#### 8.1 偵察結果(`scripts/recon4.py`,13 次請求)
+
+首頁只掛最近兩個學期,但 `Subj.jsp` 是老式 JSP,直接吃 query string 查資料庫,
+**完全不理會首頁有沒有放連結**:
+
+| 學年期 | 總覽頁單位數 | | 學年期 | 總覽頁單位數 |
+|---|---|---|---|---|
+| 114-1 | 61 | | 105-1 | 53 |
+| 113-1 | 60 | | 95-1 | 47 |
+| 113-2 | 60 | | 90-1 | 45 |
+| 110-1 | 60 | | 85-1 | 6(殘缺) |
+| 95-2 | 47 | | 80-1 | 0(空頁) |
+
+**完整資料到 90 學年度為止。** 而且整棵樹都活著 —— 往下鑽 95-1 資工系,
+`format=-3` 回 4 個班級、`format=-4` 回 12 門課,**零 warning**。
+表頭與 115-1 完全相同(23 欄,含授課語言與跨領域),教師與教室一樣是帶 code
+的 `Teach.jsp` / `Croom.jsp` 連結。結論:**現有解析器不用改任何一行**。
+
+#### 8.2 為什麼必須先升 schema v2
+
+原本的設計撐不住 25 年的資料量,兩個地方會爆:
+
+1. **頂層 `index.json` 含全部學期** → 50 個學期會膨脹到數十 MB,
+   而且它每次抓取都重寫。改成只涵蓋最新 `INDEX_SEMESTERS`(2)個學期,
+   並新增 `covers` 欄位明講範圍;歷史學期查 `{semester}/index.json`。
+2. **每個檔都有 `generated_at`** → 每次跑完所有檔案內容都變,
+   發布時等於整包重推。改成只留在 `meta.json` / `errors.json`。
+   時間戳集中在 meta 粒度也更正確:一個學期的檔案本來就是同時產生的。
+
+第 2 點的效果:同樣的抓取結果重跑一次,學期檔案 **byte 級相同**
+(`test_rerunning_produces_byte_identical_semester_files`),
+所以沒有真的變動時不會產生假 diff。
+
+兩項都是**改既有語意**,依 README 的相容性承諾升版到 2。專案上線兩天、
+幾乎沒有外部使用者,現在付這個代價最便宜。
+
+#### 8.3 發布策略:keep_files 取代 force_orphan
+
+`force_orphan` 每次把整個 `data/` 重推。archive 到數百 MB 時,
+等於每天推 6 次數百 MB —— 不是慢一點的問題,是在濫用免費資源。
+
+改成:
+
+- 例行抓取用 `keep_files: true`,`publish_dir` 只有當期的資料,
+  歷史學期原封不動留在分支上
+- 抓取前只從 gh-pages 撈 `meta.json` / `index.json` / `errors.json` 三個檔
+  (`git clone --filter=blob:none --sparse`,只 checkout 根目錄的檔案,
+  2 MB 而不是數百 MB)。理由見 `.github/workflows/restore-note.md`
+- 代價是班級 / 教師消失時遠端會留下幽靈檔,由 `crawl.yml` 的 `rebuild`
+  參數整包重發清掉,順便把 gh-pages 的 commit 歷史壓成一個
+
+**踩過的坑**:`--filter=blob:none --no-checkout` 之後 `git checkout HEAD -- <path>`
+會失敗(`unable to read sha1 file`),lazy fetch 在這條路徑上不會觸發。
+改用 `--sparse` —— 它剛好只 checkout 根目錄下的檔案,正是需要的那三個。
+
+#### 8.4 回補 CLI
+
+- `--years 90-114`:抓範圍內**尚未抓過**的學期,由新到舊
+- `--max-semesters N`:分批,避開 Actions 單 job 6 小時上限
+
+**抓過就永久跳過,不看新舊**(有別於 `--refresh-after` 對當期學期的處理)。
+過去的學期不會再變動,重抓沒有意義;更重要的是這讓回補**可以續跑** ——
+跑到一半失敗、或分批跑,再執行一次就會自動接上,不必記到哪了。
+
+太舊而總覽頁是空的學年期(80-1 以前)不會寫出空目錄,也不會在 meta.json
+留下「抓過了」的紀錄擋住之後的重試。
+
 ---
 
 ## 4. README 需包含的內容
@@ -592,7 +668,7 @@ jobs:
 
 - Cloudflare Worker 讀取 gh-pages JSON,提供伺服器端查詢 API
 - 前端網站(衝堂偵測、課表模擬)
-- 歷年資料回補(114-1 以前的學期首頁已不再提供入口)
+- 教學大綱內容(Phase 6)
 
 ---
 

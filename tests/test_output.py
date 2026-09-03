@@ -218,3 +218,71 @@ class TestStaleFiles:
 
         assert keep.exists()
         assert "不清除舊檔" in caplog.text
+
+
+class TestSchemaV2Timestamps:
+    """schema v2:`generated_at` 只留在 meta.json / errors.json。
+
+    這不是美觀問題。每個檔都帶時間戳的話,每次跑完所有檔案的內容都會變,
+    發布時等於整包重推 —— 有了 25 年的歷史資料之後那是每天好幾 GB 的流量。
+    """
+
+    def test_semester_files_have_no_timestamp(self, out):
+        for path in (out / "115-1").rglob("*.json"):
+            assert "generated_at" not in read(path), path
+
+    def test_index_has_no_timestamp(self, out):
+        assert "generated_at" not in read(out / "index.json")
+
+    def test_meta_and_errors_still_carry_it(self, out):
+        assert "generated_at" in read(out / "meta.json")
+        assert "generated_at" in read(out / "meta.json")["semesters"][0]
+        assert "generated_at" in read(out / "errors.json")
+
+    def test_rerunning_produces_byte_identical_semester_files(self, tmp_path):
+        """同樣的抓取結果重跑一次,學期檔案要一模一樣(才不會產生假 diff)。"""
+        result = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+        write_outputs(result, tmp_path)
+        before = {
+            p.relative_to(tmp_path): p.read_bytes()
+            for p in (tmp_path / "115-1").rglob("*.json")
+        }
+        write_outputs(result, tmp_path)
+        after = {
+            p.relative_to(tmp_path): p.read_bytes()
+            for p in (tmp_path / "115-1").rglob("*.json")
+        }
+        assert before == after
+
+
+class TestIndexCoverage:
+    """schema v2:頂層 index.json 只涵蓋最新的幾個學期。"""
+
+    def semesters(self, tmp_path, pairs):
+        for year, sem in pairs:
+            write_outputs(
+                crawl(FakeFetcher(), year, sem, only_departments=["59"]), tmp_path
+            )
+        return read(tmp_path / "index.json")
+
+    def test_covers_lists_the_included_semesters(self, tmp_path):
+        data = self.semesters(tmp_path, [(115, 1)])
+        assert data["covers"] == ["115-1"]
+
+    def test_older_semesters_are_dropped_from_the_top_level_index(self, tmp_path):
+        data = self.semesters(tmp_path, [(113, 1), (114, 2), (115, 1)])
+        assert data["covers"] == ["115-1", "114-2"]
+        assert {(c["year"], c["sem"]) for c in data["courses"]} == {(115, 1), (114, 2)}
+        assert data["course_count"] == 12
+
+    def test_dropped_semester_is_still_queryable_per_semester(self, tmp_path):
+        self.semesters(tmp_path, [(113, 1), (114, 2), (115, 1)])
+        old = read(tmp_path / "113-1" / "index.json")
+        assert old["course_count"] == 6
+        assert all(c["year"] == 113 for c in old["courses"])
+
+    def test_backfilling_an_old_semester_does_not_disturb_the_index(self, tmp_path):
+        self.semesters(tmp_path, [(114, 2), (115, 1)])
+        before = (tmp_path / "index.json").read_bytes()
+        write_outputs(crawl(FakeFetcher(), 95, 1, only_departments=["59"]), tmp_path)
+        assert (tmp_path / "index.json").read_bytes() == before

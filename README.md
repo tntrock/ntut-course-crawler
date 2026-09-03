@@ -8,6 +8,8 @@
 資料依**系所 / 教師 / 班級 / 學程 / 教室 / 時段**分別建索引，
 查一位老師的課不必先下載全校兩千多門課。
 
+涵蓋 **90 學年度至今**（民國 90 年起，約 25 年）。
+
 ---
 
 ## API base URL
@@ -40,7 +42,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | 路徑 | 內容 | 115-1 實際大小 |
 |---|---|---|
 | `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 2 KB |
-| `index.json` | **全部學期**的課程輕量索引 | 711 KB（gzip 61 KB）|
+| `index.json` | **最新兩個學期**的課程輕量索引 | 1.5 MB（gzip 149 KB）|
 | `errors.json` | 最近一次抓取失敗的單位（正常是空陣列） | < 1 KB |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
@@ -159,7 +161,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-09-04T02:03:11Z",
   "source": { "name": "國立臺北科技大學 課程查詢系統", "url": "https://aps.ntut.edu.tw/course/tw/" },
   "disclaimer": "本資料由非官方爬蟲自動蒐集,僅供參考…",
@@ -205,9 +207,8 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "year": 115, "sem": 1,
-  "generated_at": "2026-09-04T02:03:11Z",
   "teacher": {
     "id": "12095",
     "name": "白敦文",
@@ -251,7 +252,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "year": 115, "sem": 1,
   "departments": [
     {
@@ -277,9 +278,8 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "year": 115, "sem": 1,
-  "generated_at": "2026-09-04T02:03:11Z",
   "department": { "id": "59", "name": "資工系", "college": "電資學院", "url": "…" },
   "course_count": 53,
   "courses": [
@@ -320,8 +320,9 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 1,
-  "course_count": 2455,
+  "schema_version": 2,
+  "covers": ["115-1", "114-2"],
+  "course_count": 5264,
   "courses": [
     {
       "id": "364893",
@@ -341,8 +342,9 @@ https://tntrock.github.io/ntut-course-crawler/
 }
 ```
 
-頂層 `index.json` 含**所有**學期（`year` / `sem` 可分辨）；
-只查當學期的話用 `{semester}/index.json` 就好。
+頂層 `index.json` 只含 `covers` 列出的那幾個學期（目前是最新兩個）。
+**更早的學期不在裡面**，請改讀 `{semester}/index.json` —— 那些檔案抓過一次
+就不會再變，很適合長期快取。
 
 ### `115-1/programs.json` / `classrooms.json`
 
@@ -427,12 +429,26 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ## `schema_version` 與相容性承諾
 
-每個 JSON 檔的頂層都有 `"schema_version"`。目前是 **1**。
+每個 JSON 檔的頂層都有 `"schema_version"`。目前是 **2**。
 
 - **新增欄位、新增端點不會升版。** 請用「忽略不認得的欄位」的方式寫你的程式。
-- **移除欄位、改欄位型別、改欄位語意會升版**，並在此處與 Release Notes 說明。
+- **移除欄位、改欄位型別、改欄位語意會升版**，並在此處說明。
 - 升版時舊版路徑不保證保留 —— 這是免費的靜態檔案服務，請鎖定你測試過的版本號，
   發現 `schema_version` 變了就先檢查再上線。
+
+### v2（2026-09-04）
+
+為了容納 90 學年度起的歷史資料而做的兩個改動。**兩個都會影響既有使用端**：
+
+| 改動 | 影響 |
+|---|---|
+| 頂層 `index.json` 只涵蓋**最新兩個學期**（原本是全部） | 要更舊的學期改讀 `{semester}/index.json`；新增 `covers` 欄位明講涵蓋範圍 |
+| `generated_at` 只留在 `meta.json` 與 `errors.json` | 其他檔案不再有這個欄位。要知道某學期何時產生，讀 `meta.json` 的 `semesters[].generated_at` |
+
+**為什麼要動：** 50 個學期全塞進一個 `index.json` 會膨脹到數十 MB；
+而每個檔都帶時間戳的話，每次抓取後所有檔案內容都會變，發布時等於整包重推 ——
+以歷史資料的量級來說那是每天好幾 GB 的無謂流量。
+時間戳集中在 `meta.json` 粒度也更正確：一個學期的所有檔案本來就是同一次產生的。
 
 ## 更新頻率與學年期
 
@@ -453,6 +469,20 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
 - 學校首頁下架的舊學期**資料會留著**，只是不再更新
 
 所以 `meta.json` 的 `semesters` 會越積越多。要最新的那個就讀 `latest`。
+
+### 歷史學期只抓一次
+
+首頁只掛最近兩個學期，但 `Subj.jsp?format=-2&year=&sem=` 不理會首頁 ——
+**90 學年度起的資料都還在，而且版面 25 年沒變**（一樣是 23 欄，教師與教室
+一樣是帶代碼的連結），所以同一套解析器直接吃得下。
+
+這些歷史學期是用 `backfill` workflow 一次性抓下來的。它們不會再被重抓：
+
+- 過去的學期資料不會變動，重抓沒有意義，也是對學校無謂的負擔
+- 每 4 小時的例行抓取**完全不碰**歷史資料（發布時用 `keep_files`，
+  只推當期的檔案），所以歷史資料的存在不會拖慢日常更新
+
+如果哪個歷史學期抓壞了，重跑 `backfill` 並勾 `all_semesters` 就會重抓。
 
 ---
 
@@ -475,6 +505,12 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
   它們是兩筆獨立資料。**不要假設「同一門課 = 同一個課號」**，
   要判斷是否同一門課請一併看 `notes`。
 - **`quota` 是原始頁面的「人」欄位**，會隨選課進度變動，只反映抓取當下的狀態。
+  歷史學期的 `quota` 是**該學期結束後很久才抓的**，不代表當年選課時的即時人數。
+- **歷史資料到 90 學年度為止。** 實測 85-1 只剩零星幾個單位、80-1 以前是空頁，
+  不是抓取失敗而是系統本來就沒有。各學年度實際抓到幾個單位見 `meta.json`。
+- **舊學期的系所代碼與現在不一定對得起來。** 系所會改名、合併、裁撤，
+  代碼也會被回收。跨學期比較時請以各學期自己的 `departments.json` 為準，
+  不要拿 115-1 的代碼表去套 95-1。
 - 教學大綱內容尚未實作，目前只提供 `syllabus_url` 連結。
 
 ---
@@ -518,6 +554,9 @@ python -m crawler.main --out data/                       # 自動偵測學年期
 python -m crawler.main --year 115 --sem 1 --out data/    # 指定學年期
 python -m crawler.main --out data/ --dept 59 --pretty    # 開發用,只抓一個系所
 python -m crawler.main --out data/ --no-cache --delay 1.5
+
+# 回補歷史學期(已經抓過的會自動跳過,可以分批續跑)
+python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 ```
 
 | 參數 | 說明 |
@@ -525,6 +564,8 @@ python -m crawler.main --out data/ --no-cache --delay 1.5
 | `--year` / `--sem` | 指定學年期。**要嘛都給，要嘛都不給**；都不給就自動偵測 |
 | `--refresh-after HOURS` | 非最新學期隔多久才重抓（預設 24 小時） |
 | `--all-semesters` | 首頁列出的每個學年期都重抓，忽略 `--refresh-after` |
+| `--years FROM-TO` | 回補模式：抓這個學年度範圍內**尚未抓過**的學期，例 `--years 90-114` |
+| `--max-semesters N` | 這次最多抓幾個學期（回補分批用） |
 | `--dept CODE` | 只抓指定系所（可重複）。輸出會是不完整的資料集 |
 | `--delay` | 每次請求後的延遲秒數，**下限 0.5** |
 | `--no-cache` | 略過 `.cache/`，強制重新抓取 |
@@ -548,6 +589,7 @@ CI 就不會把解錯的資料發布出去。
 - 每次請求後強制 sleep，預設 1.0 秒，**下限 0.5 秒**（`crawler/http.py` 硬性限制）
 - workflow 設了 `concurrency` 群組，不會有兩個 job 同時抓
 - 非最新學期預設 24 小時才重抓一次，不會每 4 小時把所有學期重掃一遍
+- 歷史學期（回補下來的）抓過就永久跳過，25 年的資料只會被抓一次
 - User-Agent 帶專案網址，方便校方辨識與聯絡
 
 課程網站抓太快很容易被封鎖。這些限制不是效能問題，是能不能長久運作的問題。

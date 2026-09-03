@@ -1,0 +1,114 @@
+name: backfill
+
+# 回補歷史學期。學校首頁只掛最近兩個學期,但 Subj.jsp 不理會首頁 ——
+# 實測 90 學年度起的資料都還在,版面與現在完全相同(23 欄、教師與教室
+# 一樣是帶 code 的連結),現有解析器直接吃得下。
+#
+# 只手動觸發。回補是一次性工作:過去的學期不會再變動,已經抓過的學期會被
+# 永久跳過,所以重複執行這支就是自動接續上一批的進度,不必記到哪了。
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: '學年度範圍,例 90-114'
+        default: '90-114'
+      max_semesters:
+        description: '這批最多抓幾個學期(避開 Actions 單 job 6 小時上限)'
+        default: '12'
+      delay:
+        description: '每次請求後的延遲秒數(下限 0.5)'
+        default: '1.0'
+      all_semesters:
+        description: '連已經抓過的學期也重抓'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 與 crawl.yml 共用同一個群組:回補和日常抓取不可以同時對學校發請求。
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: pytest -q
+
+      # 三個跨學期的檔案一定要先撈回來,理由見 restore-note.md。
+      # 對回補還多一層意義:meta.json 就是「哪些學期抓過了」的唯一依據,
+      # 沒有它每一批都會從頭再抓一次。
+      - name: Restore shared index files
+        run: |
+          mkdir -p data
+          if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            for f in meta.json index.json errors.json; do
+              if [ -f ".gh-pages/$f" ]; then
+                cp ".gh-pages/$f" "data/$f"
+                echo "已還原 $f($(stat -c%s "data/$f") bytes)"
+              else
+                echo "gh-pages 上還沒有 $f"
+              fi
+            done
+          else
+            echo "gh-pages 還不存在,從零開始"
+          fi
+
+      - name: Show what is already done
+        run: |
+          if [ -f data/meta.json ]; then
+            python - <<'PY'
+          import json
+          meta = json.load(open("data/meta.json", encoding="utf-8"))
+          done = sorted(s["path"] for s in meta.get("semesters", []))
+          print(f"已有 {len(done)} 個學期:{', '.join(done)}")
+          PY
+          else
+            echo "尚無任何學期資料"
+          fi
+
+      - name: Backfill
+        env:
+          YEARS: ${{ inputs.years }}
+          MAX_SEMESTERS: ${{ inputs.max_semesters }}
+          DELAY: ${{ inputs.delay }}
+          ALL_SEMESTERS: ${{ inputs.all_semesters }}
+        run: |
+          args=(--out data/ --years "$YEARS" --delay "$DELAY")
+          if [ -n "$MAX_SEMESTERS" ]; then
+            args+=(--max-semesters "$MAX_SEMESTERS")
+          fi
+          if [ "$ALL_SEMESTERS" = "true" ]; then
+            args+=(--all-semesters)
+          fi
+          python -m crawler.main "${args[@]}"
+
+      - name: Upload data as artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backfill-${{ github.run_id }}
+          path: data/
+          retention-days: 7
+
+      # keep_files:只加上這批新抓的學期,不動已經在分支上的其他資料
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          keep_files: true

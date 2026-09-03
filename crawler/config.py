@@ -14,7 +14,16 @@ BASE_URL = "https://aps.ntut.edu.tw/course/tw/"
 
 #: 對外 API 的 schema 版本。輸出的每個 JSON 頂層都會帶這個值。
 #: 一旦有人使用,格式變更就是 breaking change,務必同步升版。
-SCHEMA_VERSION = 1
+#:
+#: v2(2026-09-04):為了容納 90 學年度起的歷史資料而改了兩件事 ——
+#:   1. `generated_at` 只留在 meta.json / errors.json。原本每個檔都有,
+#:      導致每次跑完所有檔案內容都變,發布時等於整包重推。
+#:   2. 頂層 index.json 只涵蓋最新 INDEX_SEMESTERS 個學期,更舊的查
+#:      `{semester}/index.json`。50 個學期全塞進去會膨脹到數十 MB。
+SCHEMA_VERSION = 2
+
+#: 頂層 index.json 涵蓋幾個最新的學期。歷史學期一律走 `{semester}/index.json`。
+INDEX_SEMESTERS = 2
 
 #: GitHub repo(`owner/repo`)。
 #: - 在 GitHub Actions 裡 `GITHUB_REPOSITORY` 是內建環境變數,會自動帶入正確值。
