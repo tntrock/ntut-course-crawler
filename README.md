@@ -2,8 +2,11 @@
 
 國立臺北科技大學課程資料的**非官方**靜態 API。
 
-每天自動爬取學校課程查詢系統，轉成結構化 JSON 後發布到 GitHub Pages。
+每 4 小時自動爬取學校課程查詢系統，轉成結構化 JSON 後發布到 GitHub Pages。
 沒有伺服器、沒有資料庫、不需要 API key —— 直接 `fetch()` 就能用。
+
+資料依**系所 / 教師 / 班級 / 學程 / 教室 / 時段**分別建索引，
+查一位老師的課不必先下載全校兩千多門課。
 
 ---
 
@@ -13,24 +16,140 @@
 https://tntrock.github.io/ntut-course-crawler/
 ```
 
-> 下面所有路徑都是相對於這個 base URL。
+> 下面所有路徑都是相對於這個 base URL。`{semester}` 例如 `115-1`。
 
-## 端點
+## 我想查…
 
-| 路徑 | 內容 | 大小 |
+| 我想查 | 打這支 | 例 |
 |---|---|---|
-| `meta.json` | 產生時間、涵蓋的學年期、節次對照表、必選修符號對照 | 小 |
-| `index.json` | 全部課程的輕量索引，適合一次載入後在前端做關鍵字搜尋 | 約 470 KB（gzip 後約 53 KB）|
-| `{year}-{sem}/departments.json` | 學院 / 系所 / 班級三層對照 | 小 |
-| `{year}-{sem}/courses/{系所代碼}.json` | 該系所的完整課程資料 | 小 |
-| `errors.json` | 最近一次爬取失敗的單位（正常情況是空陣列） | 小 |
+| 現在有哪幾個學期、有什麼端點 | `meta.json` | |
+| 關鍵字搜尋全部課程 | `{semester}/index.json` | `115-1/index.json` |
+| **某個系所**的課 | `{semester}/courses/{系所代碼}.json` | `115-1/courses/59.json` |
+| **某個老師**的課 | `{semester}/teachers/{教師代碼}.json` | `115-1/teachers/12095.json` |
+| **某個班級**的課表 | `{semester}/classes/{班級代碼}.json` | `115-1/classes/2915.json` |
+| 有哪些老師 / 班級 / 系所 | `{semester}/teachers.json`、`classes.json`、`departments.json` | |
+| **某個學程**有哪些課 | `{semester}/programs.json` | |
+| **某間教室**排了什麼課 | `{semester}/classrooms.json` | |
+| **星期幾第幾節**有什麼課（找空堂、擋修衝堂） | `{semester}/schedule.json` | |
 
-`{year}-{sem}` 例如 `115-1`；`{系所代碼}` 例如 `59`（資工系）。
+不知道代碼？先拉 `{semester}/departments.json`、`teachers.json`、`classes.json`，
+每一筆都附了 `path` 欄位，直接接在 base URL 後面就是明細檔的網址。
+
+## 端點總覽
+
+| 路徑 | 內容 | 115-1 實際大小 |
+|---|---|---|
+| `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 2 KB |
+| `index.json` | **全部學期**的課程輕量索引 | 711 KB（gzip 61 KB）|
+| `errors.json` | 最近一次抓取失敗的單位（正常是空陣列） | < 1 KB |
+| `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
+| `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
+| `{semester}/courses/{department_id}.json` | 系所課表（完整課程物件） | 60 檔，共 1.5 MB |
+| `{semester}/teachers.json` | 教師清單 | 89 KB |
+| `{semester}/teachers/{teacher_id}.json` | 教師課表（完整課程物件） | 803 檔，共 1.7 MB |
+| `{semester}/classes.json` | 班級清單 | 70 KB |
+| `{semester}/classes/{class_id}.json` | 班級課表（完整課程物件） | 286 檔，共 1.7 MB |
+| `{semester}/programs.json` | 學程 → 課號 | 16 KB |
+| `{semester}/classrooms.json` | 教室 → 課號 | 51 KB |
+| `{semester}/schedule.json` | 星期 × 節次 → 課號 | 55 KB |
+
+**明細檔**（`courses/` `teachers/` `classes/`）放完整課程物件，拿到就能直接顯示，
+不必再載別的檔對照。**清單檔**（`teachers.json` `classes.json` …）只放
+「有哪些、各幾門課」，做下拉選單時不會被整包資料拖慢。
+
+`programs.json` / `classrooms.json` / `schedule.json` 只放課號 —— 拿課號去
+`{semester}/index.json` 或系所明細檔查即可，避免同一份課程資料被複製太多份。
 
 ### 為什麼檔名是代碼而不是中文？
 
 中文檔名在 GitHub Pages 上會被 percent-encoding，使用者得自己處理 URL 編碼；
-而且系所會改名，代碼相對穩定。中文名稱在 `departments.json` 裡提供對照。
+而且系所會改名，代碼相對穩定。中文名稱在各清單檔裡提供對照。
+
+---
+
+## 系所代碼對照
+
+`{semester}/courses/{代碼}.json` 的代碼。**代碼是字串不是數字**
+（`"01"` 有前導零，`"C5"` 有英文字母），JSON 解析時不要當整數處理。
+
+以下為 115-1 實際抓到的 60 個單位；學校新增單位時 `departments.json` 會即時反映，
+這張表只是方便閱讀的快照。
+
+#### 電資學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `31` | 電機系 | `36` | 電子系 |
+| `59` | 資工系 | `65` | 光電系 |
+| `82` | 電資學士班 | `99` | 電資外國學生專班 |
+| `AY` | 太空所 | `C5` | 電資學院 |
+
+#### 機電學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `2B` | 智動科 | `30` | 機械系 |
+| `40` | 機電所 | `44` | 車輛系 |
+| `45` | 能源冷凍空調系 | `56` | 製科所 |
+| `61` | 自動化所 | `66` | 機電科所 |
+| `81` | 機電學士班 | `A8` | 機電科技博士外生專班 |
+| `AG` | 機械自動化外生專班 | `B2` | 半導體學士學位學程 |
+| `B3` | 半導體外生專班 | `C0` | 機電學院 |
+
+#### 工程學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `32` | 化工系 | `33` | 材資系 |
+| `34` | 土木系 | `35` | 分子系 |
+| `42` | 防災所 | `51` | 高分所 |
+| `60` | 環境所 | `68` | 生化所 |
+| `73` | 化工所 | `78` | 材料所 |
+| `79` | 資源所 | `83` | 工程科技學士班 |
+| `A0` | 能源光電外國學生專班 | | |
+
+#### 管理學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `37` | 工管系 | `57` | 經管系 |
+| `74` | 管理所 | `98` | 管理外國學生專班 |
+| `AB` | 資財系 | `C2` | 管理學院 |
+
+#### 設計學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `38` | 工設系 | `39` | 建築系 |
+| `52` | 建都所 | `58` | 創新所 |
+| `84` | 創意設計學士班 | `85` | 設計所 |
+| `AC` | 互動系 | `AT` | 互動與創新外生專班 |
+
+#### 人文與社會科學學院
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `49` | 技職所 | `54` | 英文系 |
+| `91` | 科技法律學程 | `A4` | 智財所 |
+| `A5` | 文發系 | | |
+
+#### 創新前瞻科技研究學院
+
+| 代碼 | 系所 |
+|---|---|
+| `C7` | 創新學院 |
+
+#### 行政 / 校級單位（`college` 為 `null`）
+
+| 代碼 | 系所 | 代碼 | 系所 |
+|---|---|---|---|
+| `01` | 教務處 | `10` | 體育室 |
+| `14` | 通識中心 | `62` | 師資培育中心 |
+| `AA` | 校院級課程 | | |
+
+> `C0` `C2` `C5` `C7` 這種「學院」單位掛的是院級共同課程，
+> 不是把該學院所有系的課集合起來。要一個學院的全部課程，
+> 請照 `departments.json` 的 `colleges` 分組，逐系所取。
 
 ---
 
@@ -41,16 +160,15 @@ https://tntrock.github.io/ntut-course-crawler/
 ```json
 {
   "schema_version": 1,
-  "generated_at": "2026-09-03T18:03:11Z",
-  "source": {
-    "name": "國立臺北科技大學 課程查詢系統",
-    "url": "https://aps.ntut.edu.tw/course/tw/"
-  },
-  "disclaimer": "本資料由非官方爬蟲自動蒐集,僅供參考,一切以學校公告與課程系統當下顯示的內容為準。",
+  "generated_at": "2026-09-04T02:03:11Z",
+  "source": { "name": "國立臺北科技大學 課程查詢系統", "url": "https://aps.ntut.edu.tw/course/tw/" },
+  "disclaimer": "本資料由非官方爬蟲自動蒐集,僅供參考…",
+  "latest": "115-1",
   "semesters": [
     {
       "year": 115, "sem": 1, "path": "115-1",
-      "generated_at": "2026-09-03T18:03:11Z",
+      "generated_at": "2026-09-04T02:03:11Z",
+      "partial": false,
       "department_count": 60,
       "class_group_count": 286,
       "course_count": 2455,
@@ -58,25 +176,83 @@ https://tntrock.github.io/ntut-course-crawler/
       "failed_department_count": 0
     }
   ],
-  "periods": [
-    { "code": "1", "start": "08:10", "end": "09:00" },
-    { "code": "N", "start": "12:10", "end": "13:00" },
-    { "code": "A", "start": "18:30", "end": "19:20" }
+  "endpoints": [
+    { "path": "{semester}/teachers/{teacher_id}.json", "description": "教師課表" }
   ],
-  "requirement_symbols": [
-    { "symbol": "★", "required": false, "requirement_type": "專業選修" }
+  "periods": [{ "code": "1", "start": "08:10", "end": "09:00" }],
+  "requirement_symbols": [{ "symbol": "★", "required": false, "requirement_type": "專業選修" }]
+}
+```
+
+`latest` 是目前最新的學年期。**不要把學年期寫死在前端**，讀這個欄位。
+
+### `115-1/teachers.json` → `115-1/teachers/12095.json`
+
+```json
+{
+  "teacher_count": 803,
+  "teachers": [
+    {
+      "id": "12095",
+      "name": "白敦文",
+      "course_count": 3,
+      "department_ids": ["59", "C5"],
+      "path": "115-1/teachers/12095.json"
+    }
   ]
 }
 ```
+
+```json
+{
+  "schema_version": 1,
+  "year": 115, "sem": 1,
+  "generated_at": "2026-09-04T02:03:11Z",
+  "teacher": {
+    "id": "12095",
+    "name": "白敦文",
+    "department_ids": ["59", "C5"],
+    "url": "https://aps.ntut.edu.tw/course/tw/Teach.jsp?format=-3&year=115&sem=1&code=12095"
+  },
+  "course_count": 3,
+  "courses": [ { "id": "364893", "name_zh": "數位影像處理", "...": "完整課程物件" } ]
+}
+```
+
+**教師以代碼為準，不是姓名。** 115-1 有 803 個教師代碼但只有 801 個不同姓名 ——
+確實有同名老師，用姓名分組會把兩個人的課混在一起。
+沒有 `Teach.jsp` 連結的課（少數體育、班週會類）在清單裡的 `id` 與 `path` 為 `null`。
+
+### `115-1/classes.json` → `115-1/classes/2915.json`
+
+```json
+{
+  "class_count": 286,
+  "classes": [
+    {
+      "id": "2915",
+      "name": "資工四",
+      "department_id": "59",
+      "department_name": "資工系",
+      "college": "電資學院",
+      "course_count": 53,
+      "url": "https://aps.ntut.edu.tw/course/tw/Subj.jsp?format=-4&year=115&sem=1&code=2915",
+      "path": "115-1/classes/2915.json"
+    }
+  ]
+}
+```
+
+明細檔結構與教師檔相同：`class_group` + `course_count` + `courses`。
+
+> 班級代碼（`2915`）和系所代碼（`59`）是**兩組不同的 ID**，互相推不出來。
 
 ### `115-1/departments.json`
 
 ```json
 {
   "schema_version": 1,
-  "year": 115,
-  "sem": 1,
-  "generated_at": "2026-09-03T18:03:11Z",
+  "year": 115, "sem": 1,
   "departments": [
     {
       "id": "59",
@@ -84,29 +260,28 @@ https://tntrock.github.io/ntut-course-crawler/
       "college": "電資學院",
       "url": "https://aps.ntut.edu.tw/course/tw/Subj.jsp?format=-3&year=115&sem=1&code=59",
       "class_groups": [
-        {
-          "id": "2915",
-          "name": "資工四",
-          "url": "https://aps.ntut.edu.tw/course/tw/Subj.jsp?format=-4&year=115&sem=1&code=2915"
-        }
+        { "id": "2915", "name": "資工四", "url": "…format=-4…code=2915" }
       ],
-      "course_count": 53
+      "course_count": 53,
+      "path": "115-1/courses/59.json"
     }
+  ],
+  "colleges": [
+    { "name": "電資學院", "department_ids": ["31", "36", "59", "65", "82", "99", "AY", "C5"] },
+    { "name": null, "department_ids": ["01", "10", "14", "62", "AA"] }
   ]
 }
 ```
-
-行政單位（教務處、體育室、通識中心…）的 `college` 是 `null`。
 
 ### `115-1/courses/59.json`
 
 ```json
 {
   "schema_version": 1,
-  "year": 115,
-  "sem": 1,
-  "generated_at": "2026-09-03T18:03:11Z",
-  "department": { "id": "59", "name": "資工系", "college": "電資學院", "url": "..." },
+  "year": 115, "sem": 1,
+  "generated_at": "2026-09-04T02:03:11Z",
+  "department": { "id": "59", "name": "資工系", "college": "電資學院", "url": "…" },
+  "course_count": 53,
   "courses": [
     {
       "id": "364893",
@@ -122,9 +297,7 @@ https://tntrock.github.io/ntut-course-crawler/
       "classes": ["資工四"],
       "class_ids": ["2915"],
       "department_ids": ["59"],
-      "time_slots": [
-        { "day": 5, "day_name": "五", "periods": ["2", "3", "4"] }
-      ],
+      "time_slots": [{ "day": 5, "day_name": "五", "periods": ["2", "3", "4"] }],
       "classrooms": ["六教727(e)"],
       "classroom_codes": ["452"],
       "quota": 22,
@@ -140,29 +313,84 @@ https://tntrock.github.io/ntut-course-crawler/
 }
 ```
 
-### `index.json`
+### `115-1/index.json` / `index.json`
 
-只放搜尋需要的欄位，細節請到各系所檔案取。
+只放搜尋與篩選需要的欄位，細節到明細檔取。
+`teacher_codes` / `class_ids` / `department_ids` 讓你能從搜尋結果直接跳到對應的明細檔。
 
 ```json
 {
   "schema_version": 1,
-  "generated_at": "2026-09-03T18:03:11Z",
   "course_count": 2455,
   "courses": [
     {
       "id": "364893",
       "name_zh": "數位影像處理",
       "teachers": ["白敦文"],
+      "teacher_codes": ["12095"],
       "time_slots": [{ "day": 5, "day_name": "五", "periods": ["2", "3", "4"] }],
       "department_ids": ["59"],
+      "class_ids": ["2915"],
       "credits": 3.0,
+      "required": false,
+      "requirement_type": "專業選修",
       "year": 115,
       "sem": 1
     }
   ]
 }
 ```
+
+頂層 `index.json` 含**所有**學期（`year` / `sem` 可分辨）；
+只查當學期的話用 `{semester}/index.json` 就好。
+
+### `115-1/programs.json` / `classrooms.json`
+
+```json
+{
+  "program_count": 86,
+  "programs": [
+    { "name": "人工智慧科技學程", "course_count": 33, "course_ids": ["364892", "364893"] }
+  ]
+}
+```
+
+```json
+{
+  "classroom_count": 234,
+  "classrooms": [
+    {
+      "id": "452",
+      "name": "六教727(e)",
+      "course_count": 12,
+      "course_ids": ["364893"],
+      "url": "https://aps.ntut.edu.tw/course/tw/Croom.jsp?format=-3&year=115&sem=1&code=452"
+    }
+  ]
+}
+```
+
+學程只有中文名稱、沒有代碼，所以不另外開明細檔。
+
+### `115-1/schedule.json`
+
+```json
+{
+  "periods": [{ "code": "1", "start": "08:10", "end": "09:00" }],
+  "days": [
+    {
+      "day": 3,
+      "day_name": "三",
+      "periods": [
+        { "code": "2", "course_count": 118, "course_ids": ["361345", "361351"] }
+      ]
+    }
+  ]
+}
+```
+
+`periods` 已依 `1`–`9` → `N` → `A`–`D` 排好，**不是字典序**（字典序會把 `A` 排到 `9` 前面）。
+沒有上課時間的課（體育、班週會）不會出現在這裡。
 
 ---
 
@@ -172,7 +400,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 `time_slots` 每個元素代表**一天**。`day` 是 0=日、1=一 … 6=六，
 `periods` 是節次代碼，對應時間查 `meta.json` 的 `periods`。
-沒有上課時間的課（例如體育、班週會）`time_slots` 是空陣列。
+沒有上課時間的課 `time_slots` 是空陣列。
 
 ### 必選修
 
@@ -201,17 +429,30 @@ https://tntrock.github.io/ntut-course-crawler/
 
 每個 JSON 檔的頂層都有 `"schema_version"`。目前是 **1**。
 
-- **新增欄位不會升版。** 請用「忽略不認得的欄位」的方式寫你的程式。
+- **新增欄位、新增端點不會升版。** 請用「忽略不認得的欄位」的方式寫你的程式。
 - **移除欄位、改欄位型別、改欄位語意會升版**，並在此處與 Release Notes 說明。
 - 升版時舊版路徑不保證保留 —— 這是免費的靜態檔案服務，請鎖定你測試過的版本號，
   發現 `schema_version` 變了就先檢查再上線。
 
-## 更新頻率
+## 更新頻率與學年期
 
-每天 UTC 18:00（台灣時間隔天 02:00）自動跑一次。
+**每 4 小時**自動跑一次（台灣時間 00、04、08、12、16、20 時）。
 GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象。
 
 `meta.json` 的 `generated_at` 是該次產生的實際時間，請以它為準。
+
+### 學年期是自動偵測的
+
+爬蟲每次啟動會先讀學校首頁，看目前掛了哪幾個「上課時間表」入口，
+再決定要抓哪些學期 —— **學年期沒有寫死在任何地方**。
+115-1 過完換 115-2、再換 116-1，程式與 workflow 都不用改。
+
+- **最新學期每次都重抓**（選課期間資料每天在動）
+- 其他學期預設 **24 小時**才重抓一次（過去的學期幾乎不再變動，
+  每 4 小時全部重抓只是白白增加學校的負擔）
+- 學校首頁下架的舊學期**資料會留著**，只是不再更新
+
+所以 `meta.json` 的 `semesters` 會越積越多。要最新的那個就讀 `latest`。
 
 ---
 
@@ -234,7 +475,7 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
   它們是兩筆獨立資料。**不要假設「同一門課 = 同一個課號」**，
   要判斷是否同一門課請一併看 `notes`。
 - **`quota` 是原始頁面的「人」欄位**，會隨選課進度變動，只反映抓取當下的狀態。
-- 教學大綱內容（Phase 6）尚未實作，目前只提供 `syllabus_url` 連結。
+- 教學大綱內容尚未實作，目前只提供 `syllabus_url` 連結。
 
 ---
 
@@ -273,13 +514,17 @@ pip install -r requirements-dev.txt
 ### 執行
 
 ```bash
-python -m crawler.main --year 115 --sem 1 --out data/
-python -m crawler.main --year 115 --sem 1 --out data/ --dept 59 --pretty  # 開發用
-python -m crawler.main --year 115 --sem 1 --out data/ --no-cache --delay 1.5
+python -m crawler.main --out data/                       # 自動偵測學年期
+python -m crawler.main --year 115 --sem 1 --out data/    # 指定學年期
+python -m crawler.main --out data/ --dept 59 --pretty    # 開發用,只抓一個系所
+python -m crawler.main --out data/ --no-cache --delay 1.5
 ```
 
 | 參數 | 說明 |
 |---|---|
+| `--year` / `--sem` | 指定學年期。**要嘛都給，要嘛都不給**；都不給就自動偵測 |
+| `--refresh-after HOURS` | 非最新學期隔多久才重抓（預設 24 小時） |
+| `--all-semesters` | 首頁列出的每個學年期都重抓，忽略 `--refresh-after` |
 | `--dept CODE` | 只抓指定系所（可重複）。輸出會是不完整的資料集 |
 | `--delay` | 每次請求後的延遲秒數，**下限 0.5** |
 | `--no-cache` | 略過 `.cache/`，強制重新抓取 |
@@ -302,6 +547,7 @@ CI 就不會把解錯的資料發布出去。
 - **單執行緒**，不使用 threading / asyncio / multiprocessing 平行抓取
 - 每次請求後強制 sleep，預設 1.0 秒，**下限 0.5 秒**（`crawler/http.py` 硬性限制）
 - workflow 設了 `concurrency` 群組，不會有兩個 job 同時抓
+- 非最新學期預設 24 小時才重抓一次，不會每 4 小時把所有學期重掃一遍
 - User-Agent 帶專案網址，方便校方辨識與聯絡
 
 課程網站抓太快很容易被封鎖。這些限制不是效能問題，是能不能長久運作的問題。
@@ -310,14 +556,16 @@ CI 就不會把解錯的資料發布出去。
 
 ```
 crawler/
-  config.py       # 常數(base URL / schema 版本 / 延遲 / User-Agent)
-  http.py         # 全專案唯一對外出口:限速、快取、重試、UTF-8 解碼
-  models.py       # 輸出 schema 的 dataclass 定義
-  periods.py      # 節次代碼對照與解析
-  parse_util.py   # 解析器共用工具
-  parse_dept.py   # 解析 format=-2 / -3(純函式,不連網)
-  parse_course.py # 解析 format=-4(純函式,不連網)
-  main.py         # CLI:抓取流程、去重、寫出 JSON
+  config.py         # 常數(base URL / schema 版本 / 延遲 / User-Agent)
+  http.py           # 全專案唯一對外出口:限速、快取、重試、UTF-8 解碼
+  models.py         # 輸出 schema 的 dataclass 定義
+  periods.py        # 節次代碼對照與解析
+  parse_util.py     # 解析器共用工具
+  parse_semester.py # 解析 course.jsp — 目前有哪些學年期(純函式)
+  parse_dept.py     # 解析 format=-2 / -3(純函式,不連網)
+  parse_course.py   # 解析 format=-4(純函式,不連網)
+  output.py         # 把 CrawlResult 寫成各維度的 JSON
+  main.py           # CLI:選學期、抓取流程、去重
 ```
 
 解析器一律是**純函式**：吃 HTML 字串 → 吐 dataclass，不發網路請求。

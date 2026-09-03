@@ -2,23 +2,30 @@ name: crawl
 
 on:
   schedule:
-    # UTC 18:00 ≈ 台灣時間隔天 02:00。Actions 的 cron 在尖峰常延遲十幾分鐘,
-    # 對本專案無影響。
-    - cron: '0 18 * * *'
+    # 每 4 小時一次(UTC 00/04/08/12/16/20 時 → 台灣 08/12/16/20/00/04 時)。
+    # Actions 的 cron 在尖峰常延遲十幾分鐘,對本專案無影響。
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       year:
-        description: '學年度'
-        default: '115'
+        description: '學年度(留空 = 自動偵測學校首頁目前開放的學期)'
+        default: ''
       sem:
-        description: '學期(1 或 2)'
-        default: '1'
+        description: '學期 1 或 2(填了 year 才需要)'
+        default: ''
       dept:
         description: '只抓單一系所代碼(冒煙測試用;填了就不會發布到 gh-pages)'
         default: ''
       delay:
         description: '每次請求後的延遲秒數(下限 0.5)'
         default: '1.0'
+      refresh_after:
+        description: '非最新學期隔多久才重抓一次(小時)'
+        default: '24'
+      all_semesters:
+        description: '強制重抓首頁列出的每個學年期'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -48,21 +55,50 @@ jobs:
       - name: Test
         run: pytest -q
 
-      - name: Crawl
+      # 發布用的是 force_orphan(不留歷史),所以 data/ 每次都是空的。
+      # 不先把上次的成果撈回來的話:
+      #   1. meta.json / index.json 沒有舊學期可合併,歷史學期會整個消失
+      #   2. 判斷不出「這學期上次是什麼時候抓的」,--refresh-after 形同虛設
+      - name: Restore previously published data
         run: |
-          python -m crawler.main \
-            --year  "${{ inputs.year  || '115' }}" \
-            --sem   "${{ inputs.sem   || '1'   }}" \
-            --delay "${{ inputs.delay || '1.0' }}" \
-            ${{ inputs.dept && format('--dept {0}', inputs.dept) || '' }} \
-            --out data/
+          if git clone --depth 1 --branch gh-pages --quiet \
+              "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            mkdir -p data
+            cp -r .gh-pages/. data/
+            rm -rf data/.git
+            echo "已載回前一次發布的資料:$(ls data | tr '\n' ' ')"
+          else
+            echo "gh-pages 還不存在(第一次跑),從零開始"
+          fi
 
-      # 不論成功失敗都留一份,方便事後檢查(尤其是第一次手動冒煙測試)
+      # 參數一律走環境變數,不直接把 inputs 內插進 shell —— 那是 script injection。
+      - name: Crawl
+        env:
+          YEAR: ${{ inputs.year }}
+          SEM: ${{ inputs.sem }}
+          DEPT: ${{ inputs.dept }}
+          DELAY: ${{ inputs.delay || '1.0' }}
+          REFRESH_AFTER: ${{ inputs.refresh_after || '24' }}
+          ALL_SEMESTERS: ${{ inputs.all_semesters }}
+        run: |
+          args=(--out data/ --delay "$DELAY" --refresh-after "$REFRESH_AFTER")
+          if [ -n "$YEAR" ]; then
+            args+=(--year "$YEAR" --sem "$SEM")
+          fi
+          if [ -n "$DEPT" ]; then
+            args+=(--dept "$DEPT")
+          fi
+          if [ "$ALL_SEMESTERS" = "true" ]; then
+            args+=(--all-semesters)
+          fi
+          python -m crawler.main "${args[@]}"
+
+      # 不論成功失敗都留一份,方便事後檢查
       - name: Upload data as artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: data-${{ inputs.year || '115' }}-${{ inputs.sem || '1' }}
+          name: data-${{ github.run_id }}
           path: data/
           retention-days: 7
 

@@ -133,15 +133,22 @@ ntut-course-crawler/
 │  ├─ __init__.py
 │  ├─ http.py            # 唯一對外出口:session / 編碼 / retry / 限速 / 快取
 │  ├─ models.py          # dataclass 定義輸出 schema
+│  ├─ parse_util.py      # 解析器共用工具
+│  ├─ parse_semester.py  # 解析 course.jsp — 目前有哪些學年期(Phase 7)
 │  ├─ parse_dept.py      # 解析總覽頁與單位頁
 │  ├─ parse_course.py    # 解析課程列表
-│  ├─ parse_syllabus.py  # 解析教學大綱(Phase 6)
+│  ├─ parse_syllabus.py  # 解析教學大綱(Phase 6,未實作)
 │  ├─ periods.py         # 上課時間代碼 → 結構化
+│  ├─ output.py          # 各維度 JSON 輸出(Phase 7)
 │  └─ main.py            # CLI entry point
 ├─ tests/
 │  ├─ fixtures/          # 真實 HTML 樣本(Phase 0 已產出)
+│  ├─ test_http.py
+│  ├─ test_parse_semester.py
 │  ├─ test_parse_dept.py
 │  ├─ test_parse_course.py
+│  ├─ test_output.py
+│  ├─ test_main.py
 │  └─ test_periods.py
 ├─ scripts/
 │  ├─ recon.py           # Phase 0 偵察腳本
@@ -493,6 +500,69 @@ jobs:
 
 ---
 
+### Phase 7 — 分類索引與學年期自動偵測(已完成 2026-09-04)
+
+使用者回饋:「資料全部擠在同一個檔,要查某個系所 / 某個老師的課很難找」、
+「排程改 4 小時一次」、「115-2、116-1 之後也要能自動爬」。
+
+#### 7.1 分類輸出(`crawler/output.py`)
+
+把 `main.py` 裡的輸出邏輯整支搬到 `output.py`,並補上各維度的索引:
+
+| 維度 | 清單檔 | 明細檔 | 說明 |
+|---|---|---|---|
+| 系所 | `departments.json` | `courses/{department_id}.json` | 既有 |
+| 教師 | `teachers.json` | `teachers/{teacher_id}.json` | 新增,803 檔 |
+| 班級 | `classes.json` | `classes/{class_id}.json` | 新增,286 檔 |
+| 學程 | `programs.json` | —— | 學程只有中文名,沒有能當檔名的代碼 |
+| 教室 | `classrooms.json` | —— | 234 間 |
+| 時段 | `schedule.json` | —— | 星期 × 節次 → 課號 |
+| 全部 | `index.json` / `{semester}/index.json` | —— | 輕量索引 |
+
+設計取捨:
+
+- **明細檔放完整課程物件,清單檔只放「有哪些 + 幾門課」。** 前端做下拉選單時
+  不必先吞下整包資料;點下去才載明細。
+- **教師一律以代碼為 key,不是姓名。** 115-1 實測 803 個代碼只對到 801 個姓名,
+  確實有同名老師。
+- `programs` / `classrooms` / `schedule` 只放課號,不複製課程物件 ——
+  否則同一門課會被抄進四五個檔案,總體積失控。
+- **代碼要驗證才能當檔名。** 代碼是從 HTML 抓來的字串,直接拿去組路徑等於
+  把 path traversal 的權力交給對方頁面。`_safe_id()` 只放行 `[A-Za-z0-9_-]{1,64}`。
+- **完整抓取前先清掉 `courses/` `teachers/` `classes/`。** 班級改號、系所裁撤時,
+  舊檔留在原地會變成永遠不會更新、卻查得到的幽靈資料。`--dept` 局部抓取
+  不清(會誤刪沒抓的系所),並在 `meta.json` 標 `partial: true`。
+
+115-1 實測:1159 個檔、6.5 MB;`index.json` 711 KB(gzip 61 KB)。
+
+#### 7.2 學年期自動偵測(`crawler/parse_semester.py`)
+
+學年期不再寫死。`course.jsp` 首頁本來就會列出所有「上課時間表」入口,
+一個學期一個 `Subj.jsp?format=-2&year=&sem=` 連結,抓這些連結就等於
+問學校「你現在有哪幾個學期」。
+
+`select_semesters()` 的取捨規則:
+
+- **最新學期每次都抓** —— 選課期間資料每天在動。
+- 沒有資料的學期抓 —— 新學期一掛出來就補上。
+- 其他學期超過 `--refresh-after`(預設 24 小時)才重抓。
+  排程是 4 小時一次,若每次都把所有學期重掃一遍,等於對學校的請求量乘以學期數,
+  而過去的學期資料幾乎不再變動,不值得。
+- 首頁已下架、本地還有資料的學期不抓也不刪 —— 歷史資料留著。
+
+`--year` / `--sem` 改成選填(要嘛都給,要嘛都不給)。都不給就走自動偵測。
+
+#### 7.3 workflow
+
+- cron 由 `0 18 * * *` 改成 `0 */4 * * *`。
+- 新增 **Restore previously published data** 步驟:發布用的是 `force_orphan`
+  (不留歷史),`data/` 每次都是空的。不先把上次的成果撈回來的話,
+  `meta.json` / `index.json` 沒有舊學期可合併,歷史學期會整個消失,
+  而且判斷不出「這學期上次何時抓的」,`--refresh-after` 形同虛設。
+- `workflow_dispatch` 的參數改走 `env:`,不直接內插進 shell(script injection)。
+
+---
+
 ## 4. README 需包含的內容
 
 給資料使用者看的:
@@ -522,18 +592,20 @@ jobs:
 
 - Cloudflare Worker 讀取 gh-pages JSON,提供伺服器端查詢 API
 - 前端網站(衝堂偵測、課表模擬)
-- 歷年資料回補
-- 學程 / 微學程 / 教室使用資料
+- 歷年資料回補(114-1 以前的學期首頁已不再提供入口)
 
 ---
 
 ## 7. ❓ 待確認事項(實作到對應階段時處理)
 
-| # | 問題 | 影響 | 建議處理時機 |
-|---|---|---|---|
-| 4 | 學年度 / 學期的有效範圍,以及舊學年頁面結構是否相同 | 影響歷年回補 | 未來擴充時,不影響 MVP。已知系統首頁同時提供 115-1 與 114-2 兩個學期的入口 |
+目前沒有待確認事項。
 
 ### 已解決
+
+- ~~學年度 / 學期的有效範圍,以及舊學年頁面結構是否相同~~ → 2026-09-04 Phase 7 處理掉了。
+  「有效範圍」不需要猜:`course.jsp` 首頁會列出目前開放的每個學期,程式讀它就好
+  (`crawler/parse_semester.py`)。舊學年頁面結構相同 —— 以 114-2 資工系實測,
+  同一套解析器直接吃下去,57 門課全部解析正常,不需分支處理。
 
 - ~~`truststore` 在 GitHub Actions(Linux + Python 3.12)是否需要 / 是否反而出錯~~ → 2026-09-03 第一次 `workflow_dispatch` 冒煙測試(run 33756114153,`dept=59`)確認:Linux + Python 3.12.14 上 `truststore` 正常注入,7 次請求全部成功,log 沒有任何 SSL 或注入失敗的 warning,結果與本機完全一致(53 門課)。無需特別處理。
 
