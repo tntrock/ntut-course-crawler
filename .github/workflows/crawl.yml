@@ -34,9 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330      # Actions 單 job 上限 6 小時,留緩衝
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -60,7 +60,7 @@ jobs:
       # 不論成功失敗都留一份,方便事後檢查(尤其是第一次手動冒煙測試)
       - name: Upload data as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: data-${{ inputs.year || '115' }}-${{ inputs.sem || '1' }}
           path: data/
