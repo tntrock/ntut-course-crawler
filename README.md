@@ -20,7 +20,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | 路徑 | 內容 | 大小 |
 |---|---|---|
 | `meta.json` | 產生時間、涵蓋的學年期、節次對照表、必選修符號對照 | 小 |
-| `index.json` | 全部課程的輕量索引，適合一次載入後在前端做關鍵字搜尋 | 數百 KB |
+| `index.json` | 全部課程的輕量索引，適合一次載入後在前端做關鍵字搜尋 | 約 470 KB（gzip 後約 53 KB）|
 | `{year}-{sem}/departments.json` | 學院 / 系所 / 班級三層對照 | 小 |
 | `{year}-{sem}/courses/{系所代碼}.json` | 該系所的完整課程資料 | 小 |
 | `errors.json` | 最近一次爬取失敗的單位（正常情況是空陣列） | 小 |
@@ -52,9 +52,9 @@ https://tntrock.github.io/ntut-course-crawler/
       "year": 115, "sem": 1, "path": "115-1",
       "generated_at": "2026-09-03T18:03:11Z",
       "department_count": 60,
-      "class_group_count": 412,
-      "course_count": 5123,
-      "merged_course_count": 0,
+      "class_group_count": 286,
+      "course_count": 2455,
+      "merged_course_count": 310,
       "failed_department_count": 0
     }
   ],
@@ -148,7 +148,7 @@ https://tntrock.github.io/ntut-course-crawler/
 {
   "schema_version": 1,
   "generated_at": "2026-09-03T18:03:11Z",
-  "course_count": 5123,
+  "course_count": 2455,
   "courses": [
     {
       "id": "364893",
@@ -225,9 +225,14 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
   不在 `aps.ntut.edu.tw/course/tw/` 底下。
 - **`name_en` 永遠是 `null`。** 課程列表頁與教學大綱頁都沒有英文課名，
   目前無資料來源。欄位保留是為了維持 schema 穩定。
-- **合開課程在各班級是不同課號。** 例如「數位影像處理」在資工四是 `364893`、
-  在資工所是 `364899`，`notes` 都寫「資工四和資工所合開」。
-  不要假設「同一門課 = 同一個課號」，要判斷是否同一門課請一併看 `notes`。
+- **課號在一個學期內唯一，但「合開」的課各班級是不同課號。**
+  同一個課號若出現在多個班級頁（通識、體育、校院級課程很常見），
+  會合併成一筆，`classes` / `class_ids` / `department_ids` 列出全部。
+  115-1 有 110 門課跨多個系所。
+  但「合開」不是這種情況 —— 例如「數位影像處理」在資工四是 `364893`、
+  在資工所是 `364899`，`notes` 都寫「資工四和資工所合開」，
+  它們是兩筆獨立資料。**不要假設「同一門課 = 同一個課號」**，
+  要判斷是否同一門課請一併看 `notes`。
 - **`quota` 是原始頁面的「人」欄位**，會隨選課進度變動，只反映抓取當下的狀態。
 - 教學大綱內容（Phase 6）尚未實作，目前只提供 `syllabus_url` 連結。
 
