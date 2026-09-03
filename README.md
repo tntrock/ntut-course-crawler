@@ -10,7 +10,7 @@
 ## API base URL
 
 ```
-https://<你的 GitHub 帳號>.github.io/ntut-course-crawler/
+https://tntrock.github.io/ntut-course-crawler/
 ```
 
 > 下面所有路徑都是相對於這個 base URL。
