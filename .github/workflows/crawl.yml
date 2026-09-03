@@ -1,0 +1,76 @@
+name: crawl
+
+on:
+  schedule:
+    # UTC 18:00 ≈ 台灣時間隔天 02:00。Actions 的 cron 在尖峰常延遲十幾分鐘,
+    # 對本專案無影響。
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      year:
+        description: '學年度'
+        default: '115'
+      sem:
+        description: '學期(1 或 2)'
+        default: '1'
+      dept:
+        description: '只抓單一系所代碼(冒煙測試用;填了就不會發布到 gh-pages)'
+        default: ''
+      delay:
+        description: '每次請求後的延遲秒數(下限 0.5)'
+        default: '1.0'
+
+permissions:
+  contents: write
+
+# 同時只跑一個 crawl。兩個 job 一起抓等於對學校併發請求,
+# 那正是 plan.md §1.4 要避免的事。
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330      # Actions 單 job 上限 6 小時,留緩衝
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      # 解析器的測試是對真實 fixture 斷言的。學校改版時這裡會先紅,
+      # 我們就不會把解錯的資料發布出去。
+      - name: Test
+        run: pytest -q
+
+      - name: Crawl
+        run: |
+          python -m crawler.main \
+            --year  "${{ inputs.year  || '115' }}" \
+            --sem   "${{ inputs.sem   || '1'   }}" \
+            --delay "${{ inputs.delay || '1.0' }}" \
+            ${{ inputs.dept && format('--dept {0}', inputs.dept) || '' }} \
+            --out data/
+
+      # 不論成功失敗都留一份,方便事後檢查(尤其是第一次手動冒煙測試)
+      - name: Upload data as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ inputs.year || '115' }}-${{ inputs.sem || '1' }}
+          path: data/
+          retention-days: 7
+
+      # 只抓單一系所時資料是不完整的,不可以蓋掉線上的完整資料集
+      - name: Publish to gh-pages
+        if: ${{ !inputs.dept }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          force_orphan: true    # 不保留歷史,避免 repo 無限膨脹
