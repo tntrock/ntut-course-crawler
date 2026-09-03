@@ -1,0 +1,5 @@
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.0
+tenacity>=9.0
+truststore>=0.9

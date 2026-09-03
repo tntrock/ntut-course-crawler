@@ -1,0 +1,541 @@
+# 北科課程系統爬蟲 + 靜態 API — 開發規劃書
+
+> 這份文件是給開發代理(Claude Code)的完整規格。請**依階段順序執行**,每個階段有明確的驗收條件,未通過不要進入下一階段。
+
+> **文件狀態(2026-09-03 更新)**:Phase 0 偵察已完成,本文件已依實測結果修正。
+>
+> - ✅ = 已由真實 fixture 驗證的事實
+> - ❓ = 尚未驗證的推測,**不可當成已知條件**,遇到時要先確認再實作
+>
+> **Phase 0 推翻的原始假設(重要)**:
+>
+> 1. 編碼不是 Big5 / cp950,是 **UTF-8**
+> 2. 階層比原本畫的**多一層**:`format=-2` → `-3` → `-4` 才是課程列表
+> 3. 總覽頁給的分組是**學院**,不是原本模型裡的「學制」
+> 4. Python 內建 SSL 驗證會擋掉學校憑證,需用 `truststore`(見 §1.5)
+
+---
+
+## 0. 專案目標
+
+建立一個**完全免費、全雲端**的爬蟲與資料發布系統:
+
+1. 定期爬取國立臺北科技大學課程系統的公開課程資料
+2. 轉換為結構化 JSON
+3. 透過 GitHub Pages 發布為靜態 API,供他人使用
+
+**技術棧**:Python 3.12 + GitHub Actions + GitHub Pages
+**不使用**:無頭瀏覽器(Selenium/Playwright)、外部資料庫、任何付費服務
+
+---
+
+## 1. 目標網站資訊
+
+### 1.1 基本資料
+
+- 系統首頁:`https://aps.ntut.edu.tw/course/tw/course.jsp`
+- 技術特徵:傳統 JSP + 表格排版,**無前端渲染**,可用純 HTTP request 抓取 ✅
+- 編碼:**UTF-8** ✅
+  - 回應標頭為 `Content-Type: text/html; charset=UTF-8`,實際內容也確實是 UTF-8
+  - 頁面內有一行 `<meta charset=UTF-8>` 但**被 HTML 註解包住**,不要依賴它判斷
+  - 直接 `content.decode('utf-8')` 即可,不需要 `errors='replace'` 降級
+
+### 1.2 已知的 URL 模式 ✅
+
+(`year` = 學年度,`sem` = 學期)
+
+| 用途 | URL 模式 |
+|---|---|
+| 學院 / 單位總覽(主要入口) | `/course/tw/Subj.jsp?format=-2&year=115&sem=1` |
+| 單位底下的班級列表 | `/course/tw/Subj.jsp?format=-3&year=115&sem=1&code={單位代碼}` |
+| **實際課程列表** | `/course/tw/Subj.jsp?format=-4&year=115&sem=1&code={班級代碼}` |
+| 教學大綱 | `/course/tw/ShowSyllabus.jsp?snum={課號}&code={教師代碼}` |
+| 教師授課時數 | `/course/tw/Teach.jsp?format=-3&year=115&sem=1&code={教師代碼}` |
+| 教室使用情形 | `/course/tw/Croom.jsp?format=-3&year=115&sem=1&code={教室代碼}` |
+| 必選修符號說明(課程標準) | `/course/tw/Cprog.jsp?format=-5` ✅ 對照表見 Phase 3 |
+
+**MVP 只做 `Subj.jsp` 這條線**,其他先不碰。
+
+### 1.3 實際階層結構 ✅
+
+```
+Subj.jsp?format=-2&year=115&sem=1                ← 學院 / 行政單位總覽
+  └─ Subj.jsp?format=-3&...&code={單位代碼}       ← 該單位底下的班級列表
+       └─ Subj.jsp?format=-4&...&code={班級代碼}   ← 課程列表(每列一門課)
+            └─ ShowSyllabus.jsp?snum=&code=       ← 教學大綱(可選,量大)
+```
+
+實例(資工系):
+
+```
+format=-2                    → 電資學院 底下有「資工系」,code=59
+format=-3&code=59            → 資工一(3718) / 資工二(3138) / 資工三(3032) / 資工四(2915) / 資工所(3743)
+format=-4&code=2915          → 資工四的課程表格
+ShowSyllabus.jsp?snum=364893&code=12095  → 「數位影像處理」的教學大綱
+```
+
+**三個必須注意的陷阱**:
+
+1. **總覽頁第一個連結不是系所**。`format=-2` 的第一列是行政單位(教務處 `code=01`、體育室 `code=10`、通識中心 `code=14`、師資培育中心 `code=62`、校院級課程 `code=AA`),往下爬只會拿到「遠距教學班」「輔導課程」這類班群。真正的系所在後面的學院表格裡。開發時**不要拿第一個連結當樣本**。
+2. **`code` 在 `-3` → `-4` 之間會換一組**。系所代碼是 `59`(兩碼英數),班級代碼是 `2915`(四位數字),兩者無法互推,是伺服器另配的 ID。**一定要從 `-3` 頁面解析出完整連結**,不可自己拼 URL。
+3. **同一門課會出現在多個班級頁**。備註欄常見「資工四和資工所合開」,代表同一課號會在兩個 `format=-4` 頁面各出現一次。輸出前要**依課號去重**,並保留它隸屬的所有班級。
+
+### 1.4 ⚠️ 重要限制:必須限速
+
+參考既有專案 [gnehs/ntut-course-crawler-node](https://github.com/gnehs/ntut-course-crawler-node) 的作者說明:
+
+> 課程網站若抓取過快很容易被封鎖,因此本爬蟲有限制同一時間抓取頁面數量。
+> 我抓二十年的資料花了大概兩天。
+
+**因此本專案硬性規定**:
+
+- **單執行緒**,不使用 `threading` / `asyncio` / `multiprocessing` 平行抓取
+- 每次請求後強制 sleep(預設 1.0 秒,可由參數調整,但**下限 0.5 秒**)
+- User-Agent 必須有辨識度並附聯絡方式
+- 這些規則**不得為了「加快速度」而放寬**
+
+> Phase 0 全程共只發出 6 次請求,間隔 2 秒。後續開發一律對 fixtures 進行,不再打學校伺服器。
+
+**請求量估算(給 Phase 4 排程參考)**:單學期約 1 個總覽頁 + 約 60 個單位頁 + 每單位數個班級頁,粗估 300～500 次請求,以 1 秒間隔約 10 分鐘內可完成。教學大綱則是每門課一次(數千次),另計,見 Phase 6。
+
+### 1.5 SSL 憑證問題 ✅
+
+Python 內建 `ssl`(OpenSSL 3.x 嚴格模式)會拒絕學校憑證:
+
+```
+CERTIFICATE_VERIFY_FAILED: Missing Subject Key Identifier
+```
+
+但 `curl`(走 Windows schannel)與瀏覽器都能正常驗證。判定是憑證缺少非必要的擴充欄位,被 OpenSSL 嚴格模式擋下,**不是真的中間人風險**。
+
+**解法**:使用 [`truststore`](https://pypi.org/project/truststore/) 讓 Python 走系統憑證庫驗證,行為與 curl / 瀏覽器一致:
+
+```python
+import truststore
+truststore.inject_into_ssl()   # 必須在 import requests 之前
+import requests
+```
+
+**不要用 `verify=False` 關閉驗證**,那是把問題蓋掉而不是解掉。
+
+❓ 本機環境是 Python 3.14(OpenSSL 嚴格模式);CI 指定 Python 3.12,可能根本不會遇到這個錯誤。**Phase 5 第一次跑 workflow 時要確認 Linux 上的行為**,若 `truststore` 在 Linux 反而出問題,就改成只在需要時注入。
+
+---
+
+## 2. 專案結構
+
+```
+ntut-course-crawler/
+├─ .github/
+│  └─ workflows/
+│     └─ crawl.yml
+├─ crawler/
+│  ├─ __init__.py
+│  ├─ http.py            # 唯一對外出口:session / 編碼 / retry / 限速 / 快取
+│  ├─ models.py          # dataclass 定義輸出 schema
+│  ├─ parse_dept.py      # 解析總覽頁與單位頁
+│  ├─ parse_course.py    # 解析課程列表
+│  ├─ parse_syllabus.py  # 解析教學大綱(Phase 6)
+│  ├─ periods.py         # 上課時間代碼 → 結構化
+│  └─ main.py            # CLI entry point
+├─ tests/
+│  ├─ fixtures/          # 真實 HTML 樣本(Phase 0 已產出)
+│  ├─ test_parse_dept.py
+│  ├─ test_parse_course.py
+│  └─ test_periods.py
+├─ scripts/
+│  ├─ recon.py           # Phase 0 偵察腳本
+│  └─ recon2.py          # Phase 0 第二輪(真實系所)
+├─ .gitignore
+├─ requirements.txt
+└─ README.md
+```
+
+### 依賴 (`requirements.txt`)
+
+```
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.0
+tenacity>=9.0
+truststore>=0.9
+```
+
+**不要引入 Scrapy** — 站台階層很淺,框架成本大於收益。
+
+### `.gitignore`
+
+```
+__pycache__/
+*.pyc
+.cache/
+data/
+.venv/
+```
+
+---
+
+## 3. 開發階段
+
+### ✅ Phase 0 — 偵察(已完成 2026-09-03)
+
+**產出的 fixtures**(全部在 `tests/fixtures/`):
+
+| 檔案 | 內容 |
+|---|---|
+| `subj_overview.html` | `format=-2` 學院 / 單位總覽 |
+| `dept_page.html` | `format=-3` 教務處(行政單位範例) |
+| `dept_page_real.html` | `format=-3` 資工系(真實系所範例) |
+| `course_list_real.html` | `format=-4` 資工四課程列表 |
+| `syllabus_page_real.html` | `ShowSyllabus.jsp` 教學大綱頁 |
+
+**結論**:編碼 UTF-8、階層多一層、SSL 需 `truststore`,詳見 §1.1 / §1.3 / §1.5。
+
+**之後所有解析器開發都對著 fixtures 進行,不再重複打學校伺服器。**
+
+---
+
+### Phase 1 — `http.py`(全專案風險最高的一塊)
+
+**設計原則**:整個專案**只有這個模組**能發出對外請求。
+
+**必須實作**:
+
+```python
+def fetch(url: str, *, params: dict | None = None) -> str:
+    """回傳已正確解碼的 HTML 字串。"""
+```
+
+內部行為:
+
+| 項目 | 要求 |
+|---|---|
+| SSL | `truststore.inject_into_ssl()`,且必須在 `import requests` 之前執行 |
+| Session | 使用單一 `requests.Session()`,保留 cookie(站台會發 `JSESSIONID`) ✅ |
+| User-Agent | `ntut-course-crawler/1.0 (+https://github.com/{USER}/{REPO})` |
+| 編碼 | 固定 `content.decode('utf-8')` ✅,不要相信 `r.encoding` 自動判斷 |
+| 限速 | 每次請求**後** sleep,預設 1.0s,可由環境變數 `CRAWL_DELAY` 覆寫,下限 0.5s |
+| Timeout | `timeout=(10, 30)` (connect, read) |
+| Retry | `tenacity`:5xx / Timeout / ConnectionError 時指數退避,最多 4 次,起始 2s |
+| 不重試 | 4xx 直接拋出(重試沒意義,且可能是被擋) |
+| 快取 | 見下方 |
+
+**本地 HTTP 快取(重要)**:
+
+- 快取目錄 `.cache/`,檔名為 URL(含 query)的 `sha256` hex
+- 命中快取時**不 sleep、不發請求**
+- CLI 提供 `--no-cache` 強制略過
+- 理由:開發期會反覆執行;教學大綱等歷史資料幾乎不變;失敗重跑只補缺漏
+
+**驗收條件**:
+
+- 對 fixture 對應的 URL 呼叫 `fetch()`,能取回無亂碼中文
+- 連續兩次呼叫同一 URL,第二次明顯更快(快取生效)
+- 單元測試驗證 sleep 下限不可被設成 0
+
+---
+
+### Phase 2 — 資料模型 `models.py`
+
+用 `dataclass`,並提供 `to_dict()`。**這是對外 API 的契約,請慎重設計。**
+
+欄位已依 `course_list_real.html` 的**實際 23 欄**修正:
+
+```python
+@dataclass
+class TimeSlot:
+    day: int              # 0=日, 1=一, ..., 6=六
+    periods: list[str]    # ["3", "4"] 或 ["N"], 保留原始代碼字元
+
+@dataclass
+class Course:
+    id: str                    # 課號, 例 "364893"
+    name_zh: str
+    name_en: str | None        # ❓ 課程列表頁沒有英文名, 可能要從教學大綱取
+    stage: str | None          # 階段, 例 "1"
+    credits: float | None
+    hours: int | None
+    required: bool | None         # 必=True / 選=False, 由符號判定(對照表見 Phase 3)
+    requirement_type: str | None  # 完整類別, 例 "專業選修" / "部訂共同必修"
+    teachers: list[str]
+    teacher_codes: list[str]   # Teach.jsp 的 code, 組教學大綱 URL 要用
+    classes: list[str]         # 開課班級, 來自表格上方 <th colspan=23>
+    time_slots: list[TimeSlot]
+    classrooms: list[str]
+    quota: int | None          # 人數
+    withdrawn: int | None      # 撤選人數
+    language: str | None       # 授課語言, 空白代表中文
+    syllabus_url: str | None
+    notes: str | None          # 備註, 例 "資工四和資工所合開"
+    audit: str | None          # 隨班附讀
+    lab: str | None            # 實驗 / 實習
+    programs: list[str]        # 跨領域學程 / 微學程, 以 <BR> 分隔多值
+
+@dataclass
+class Department:
+    id: str                    # 總覽頁的 code, 例 "59"
+    name: str                  # 例 "資工系"
+    college: str | None        # 學院, 例 "電資學院"; 行政單位為 None
+    url: str
+
+@dataclass
+class ClassGroup:              # 新增: format=-4 那一層
+    id: str                    # 例 "2915"
+    name: str                  # 例 "資工四"
+    department_id: str         # 例 "59"
+    url: str
+```
+
+> **模型變更說明**:原規格的 `Department.education_type`(學制:日間部/進修部)**移除**,因為 `format=-2` 頁面實際提供的分組是**學院**(機電/工程/管理/設計/人文與社會科學/電資/創新前瞻科技研究),沒有學制欄位。進修部課程是否另有入口尚未確認,列入 §7。
+
+**教學大綱 URL 可直接組出**(不需額外請求探索) ✅:
+
+```
+ShowSyllabus.jsp?snum={課號}&code={該課第一位教師的 teacher_code}
+```
+
+已驗證:`數位影像處理` 課號 364893 + 白敦文 code 12095 → `snum=364893&code=12095`,三筆樣本皆吻合。
+
+**時間欄位務必結構化**。`periods.py` 負責把表格的 7 個星期欄位轉為 `TimeSlot`,並附完整單元測試涵蓋 `N`、`A`~`D` 等特殊節次。
+
+節次對照(頁面底部即附此表)✅:
+
+```
+1: 08:10-09:00   2: 09:10-10:00   3: 10:10-11:00   4: 11:10-12:00   N: 12:10-13:00
+5: 13:10-14:00   6: 14:10-15:00   7: 15:10-16:00   8: 16:10-17:00   9: 17:10-18:00
+A: 18:30-19:20   B: 19:20-20:10   C: 20:20-21:10   D: 21:10-22:00
+```
+
+建議 `periods.py` 也輸出這張對照表(供下游渲染課表用),放進 `meta.json`。
+
+---
+
+### Phase 3 — 解析器
+
+三個模組,**全部寫成純函式**:吃 HTML 字串 → 吐 dataclass。不在解析器內發網路請求。
+
+```python
+def parse_colleges(html: str) -> list[Department]: ...       # format=-2
+def parse_class_groups(html: str) -> list[ClassGroup]: ...   # format=-3
+def parse_courses(html: str) -> list[Course]: ...            # format=-4
+```
+
+**對 fixtures 開發,完全離線。**
+
+每個解析器都要有對應測試,對 fixture 斷言關鍵欄位。學校改版時測試會先失敗,這是刻意的預警機制。建議斷言:
+
+- `subj_overview.html` → 能取到「資工系」且其 `college == "電資學院"`
+- `dept_page_real.html` → 5 個班級,含 `資工四` / code `2915`
+- `course_list_real.html` → 6 門課,`364893` 的名稱是「數位影像處理」、學分 3.0、教師「白敦文」、時間為週五 2/3/4 節、教室「六教727(e)」
+
+**實測的 HTML 特性(照這個寫,不要憑印象)** ✅:
+
+- **`<tr>` / `<td>` 都沒有收尾標籤**,是老式 JSP 輸出。必須用 `BeautifulSoup(html, 'lxml')`,html.parser 容易切錯。
+- **總覽頁用 `rowspan` 表示學院**:`<tr><td rowspan=3>機電學院` 後面接三個 `<tr>`,學院名稱只出現一次。parse 時要往回追 rowspan 才能把系所對到學院;第一列行政單位的學院欄是空白(`　`),對應 `college = None`。
+- **課程表格固定 23 欄**,表頭為:課號、課程名稱、階段、學分、時數、修、教師、日、一、二、三、四、五、六、教室、人、撤、授課語言、教學大綱與進度表、備註、隨班附讀、實驗實習、跨領域。
+- **班級名稱在表格第一列**:`<tr><th colspan=23>資工四`。
+- **要跳過的列**:
+  - 開頭的「班週會及導師時間」(課號欄空白,不是真的課)
+  - 結尾的「小計」列(`<td align=CENTER>小計`,只有學分/時數合計)
+  - 判斷方式:**課號欄為空或非數字就跳過**,不要用列的位置判斷
+- **多值欄位以 `<BR>` 分隔**(教師、教室、跨領域學程),要拆成 list;不要用空白切,課程名稱本身可能含空白。
+- **空欄位是全形空白 `　`(U+3000)**,不是空字串。正規化時要一併 strip 掉,否則會得到看起來是空、實際長度為 1 的字串。
+- 教師與教室都包在 `<a>` 裡,`href` 帶 code(`Teach.jsp?...code=12095` / `Croom.jsp?...code=452`),要一併取出。
+
+**必選修符號對照** ✅(來源:`Cprog.jsp?format=-5` 課程標準頁):
+
+| 符號 | 必選修別 | 詳細類別 | `required` | `requirement_type` |
+|---|---|---|---|---|
+| ○ | 必 | 部訂共同必修 | `True` | `"部訂共同必修"` |
+| △ | 必 | 校訂共同必修 | `True` | `"校訂共同必修"` |
+| ☆ | **選** | 共同選修 | `False` | `"共同選修"` |
+| ● | 必 | 部訂專業必修 | `True` | `"部訂專業必修"` |
+| ▲ | 必 | 校訂專業必修 | `True` | `"校訂專業必修"` |
+| ★ | **選** | 專業選修 | `False` | `"專業選修"` |
+
+實作注意:
+
+- 符號包在 `<A href="Cprog.jsp?format=-5">★</A>` 裡,取 anchor 的文字,不是 `href`
+- **`★` 與 `☆` 都是「選」**。兩者差別在共同 / 專業,不是必 / 選
+- 欄位為空(全形空白)時 `required = None`,**不要預設為 `False`**
+- 遇到表上沒有的符號 → `required = None` + warning,不要猜
+
+> 這解釋了 fixture 的現象:`course_list_real.html`(資工四)全部是 ☆ 與 ★,因為該頁列的本來就都是選修課。先前「★ 可能是必修」的推測是錯的,已由課程標準頁推翻。
+
+**解析注意事項**:
+
+- 欄位缺失時填 `None`,**不要拋例外中斷整批**;記錄 warning 繼續
+- 遇到欄數不是 23 的列,記 warning 後跳過該列,不要讓整頁失敗
+
+---
+
+### Phase 4 — `main.py` 與輸出
+
+**抓取流程**:
+
+```
+1. fetch format=-2         → parse_colleges  → list[Department]
+2. for each Department:
+     fetch format=-3       → parse_class_groups → list[ClassGroup]
+3. for each ClassGroup:
+     fetch format=-4       → parse_courses      → list[Course]
+4. 依課號去重合併(同課號出現在多班級時, 合併 classes 欄位)
+5. 寫出 JSON
+```
+
+**CLI**:
+
+```bash
+python -m crawler.main --year 115 --sem 1 --out data/
+python -m crawler.main --year 115 --sem 1 --out data/ --no-cache --delay 1.5
+python -m crawler.main --year 115 --sem 1 --out data/ --dept 59   # 只抓單一系所, 開發用
+```
+
+> `--dept` 改用**系所代碼**(如 `59`)而非中文名,因為系所短名(資工系)與全名(資訊工程系)不一致,用代碼較穩定。
+
+**輸出結構**:
+
+```
+data/
+├─ meta.json                      # 產生時間、schema_version、涵蓋的學年期、節次對照表、必選修符號對照
+├─ index.json                     # 輕量索引,供前端載入後自行 filter
+└─ 115-1/
+   ├─ departments.json            # 含學院、系所、班級三層對照
+   └─ courses/
+      ├─ 59.json                  # 以系所代碼命名
+      └─ 31.json
+```
+
+> **檔名變更說明**:原規格用中文檔名(`資訊工程系.json`)。改用**系所代碼**,理由:中文檔名在 GitHub Pages 上會被 percent-encoding,使用者要自己處理 URL 編碼;且系所可能改名,代碼較穩定。中文名稱在 `departments.json` 裡提供對照。
+
+**`index.json` 設計**:只含 `id` / `name_zh` / `teachers` / `time_slots` / `dept` / `credits`。目的是讓前端一次載入就能做關鍵字搜尋,不必逐系所請求。控制在合理大小(單學期應在數百 KB 以內)。
+
+**每個 JSON 檔頂層必須含 `"schema_version": 1`。** API 一旦有人使用,格式變更就是 breaking change,需要版本標記。
+
+**錯誤處理**:
+
+- 單一系所抓取失敗 → 記錄到 `data/errors.json`,繼續下一個
+- 全部失敗才以非零 exit code 結束
+- 結束時印出摘要:成功/失敗系所數、課程總數、耗時
+
+---
+
+### Phase 5 — GitHub Actions
+
+`.github/workflows/crawl.yml`:
+
+```yaml
+name: crawl
+
+on:
+  schedule:
+    - cron: '0 18 * * *'    # UTC 18:00 ≈ 台灣時間 02:00
+  workflow_dispatch:         # 手動觸發(務必保留)
+    inputs:
+      year:
+        default: '115'
+      sem:
+        default: '1'
+
+permissions:
+  contents: write
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330      # Actions 單 job 上限 6 小時,留緩衝
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Crawl
+        run: |
+          python -m crawler.main \
+            --year "${{ inputs.year || '115' }}" \
+            --sem  "${{ inputs.sem  || '1' }}" \
+            --out data/
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          force_orphan: true    # 不保留歷史,避免 repo 無限膨脹
+```
+
+**注意事項**:
+
+- **第一次跑要先確認 SSL 在 Linux 能通**(見 §1.5),建議先用 `workflow_dispatch` 手動跑一次只抓單一系所
+- `workflow_dispatch` 必須保留,否則每次測試都要等 cron
+- GitHub Actions 的 cron 在尖峰時段常延遲十幾分鐘,對本專案無影響
+- 若要抓歷年資料,**不要在單一 job 跑完**,改用 matrix 每次一個學年,或分多次手動觸發
+- `force_orphan: true` 讓 gh-pages 每次覆蓋,repo 不會因每日 commit 完整 JSON 而膨脹
+
+---
+
+### Phase 6 — 教學大綱(可選,量大)
+
+只在前面都穩定後才做。教學大綱是 N+1 請求(每門課一次),以 1 秒間隔計算,單學期數千門課即需數小時。
+
+建議:
+
+- 獨立 CLI flag `--with-syllabus`
+- 預設關閉
+- 高度依賴 `.cache/`,歷史學期抓過一次就不用再抓
+- 輸出到獨立檔案 `data/115-1/syllabus/{course_id}.json`,不塞進主課程檔
+- URL 可由課號 + 教師代碼直接組出(見 Phase 2),不需先探索連結
+
+---
+
+## 4. README 需包含的內容
+
+給資料使用者看的:
+
+- API base URL(GitHub Pages 網址)
+- 各端點路徑與範例回應
+- `schema_version` 說明與相容性承諾
+- 資料更新頻率
+- 資料來源聲明(北科大課程系統)與免責聲明:非官方、僅供參考、以學校公告為準
+- 授權(建議 MIT,資料本身標註來源)
+
+---
+
+## 5. 開發原則(給 Claude Code 的執行守則)
+
+1. **階段順序不可跳過**。Phase 0 已完成,fixtures 已在 `tests/fixtures/`。
+2. **不要為了加速而移除限速或改用平行抓取**,即使測試時覺得慢。
+3. **開發期一律使用快取或 fixtures**,不要為了驗證而反覆打學校伺服器。若真的需要新樣本,一次只抓一頁並說明理由。
+4. **不要猜測 HTML 結構**。§3 Phase 3 列的特性都是實測結果;若與現況不符,以 fixture 為準並回報差異。
+5. 解析器遇到非預期結構時,**降級處理(填 None + warning)而非拋例外**。
+6. 每個 Phase 完成後停下來說明成果與驗收結果,再繼續。
+7. 遇到 ❓ 標記的項目,**先確認再實作**,不要當成已知條件往下寫。
+
+---
+
+## 6. 未來擴充方向(本次不做)
+
+- Cloudflare Worker 讀取 gh-pages JSON,提供伺服器端查詢 API
+- 前端網站(衝堂偵測、課表模擬)
+- 歷年資料回補
+- 學程 / 微學程 / 教室使用資料
+
+---
+
+## 7. ❓ 待確認事項(實作到對應階段時處理)
+
+| # | 問題 | 影響 | 建議處理時機 |
+|---|---|---|---|
+| 1 | 進修部 / 研究所在職專班課程是否在同一個 `format=-2` 樹裡 | 可能漏掉整批課程 | Phase 3。檢查總覽頁是否已涵蓋,或另有 `year`/`sem` 以外的參數 |
+| 2 | 課程英文名稱來源 | `Course.name_en` 可能只能留 `None`,或必須開 Phase 6 才有 | Phase 2。先看 `syllabus_page_real.html` 有沒有 |
+| 3 | `truststore` 在 GitHub Actions(Linux + Python 3.12)是否需要 / 是否反而出錯 | workflow 可能整個跑不起來 | Phase 5 第一次手動觸發時 |
+| 4 | 學年度 / 學期的有效範圍,以及舊學年頁面結構是否相同 | 影響歷年回補 | 未來擴充時,不影響 MVP |
+
+### 已解決
+
+- ~~`★` / `☆` 的確切語意~~ → 2026-09-03 由使用者提供的課程標準頁確認,對照表已寫入 Phase 3。原推測(★=必修)為誤,實際上 ★ 與 ☆ 都是**選修**。
