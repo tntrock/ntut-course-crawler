@@ -6,11 +6,19 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from crawler.config import SCHEMA_VERSION
-from crawler.main import crawl, main, write_outputs
+from crawler.main import (
+    crawl,
+    discover_semesters,
+    main,
+    select_semesters,
+    write_outputs,
+)
+from crawler.models import Semester
 from tests.conftest import load_fixture
 
 
@@ -34,6 +42,9 @@ class FakeFetcher:
         if code in self.fail_on:
             raise RuntimeError(f"模擬 {code} 抓取失敗")
 
+        if url == "course.jsp":
+            # 首頁列出 115-1 與 114-2 兩個學年期
+            return load_fixture("course_home_real.html")
         if fmt == -2:
             return load_fixture("subj_overview.html")
         if fmt == -3:
@@ -205,10 +216,14 @@ class TestOutputFiles:
         data = self.read(out / "index.json")
         assert data["course_count"] == 6
         entry = data["courses"][0]
+        # 索引刻意不放完整課程物件。teacher_codes / class_ids 是為了讓搜尋結果
+        # 能直接跳到 teachers/{code}.json 與 classes/{id}.json,少了就沒得篩。
         assert set(entry) == {
-            "id", "name_zh", "teachers", "time_slots",
-            "department_ids", "credits", "year", "sem",
+            "id", "name_zh", "teachers", "teacher_codes", "time_slots",
+            "department_ids", "class_ids", "credits",
+            "required", "requirement_type", "year", "sem",
         }
+        assert "classrooms" not in entry and "syllabus_url" not in entry
 
     def test_meta_has_lookup_tables(self, out):
         meta = self.read(out / "meta.json")
@@ -256,3 +271,127 @@ class TestOutputFiles:
         write_outputs(result, tmp_path)
         raw = (tmp_path / "115-1" / "courses" / "59.json").read_text(encoding="utf-8")
         assert "數位影像處理" in raw and "\\u" not in raw
+
+
+# --------------------------------------------------------------------------
+# 學年期自動偵測
+# --------------------------------------------------------------------------
+def write_meta(out_dir, entries):
+    """手工造一份 meta.json,用來假裝「上次抓完是什麼時候」。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "meta.json").write_text(
+        json.dumps({"semesters": entries}, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def stamp(hours_ago):
+    moment = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc) - timedelta(hours=hours_ago)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+AVAILABLE = [Semester(115, 1), Semester(114, 2)]
+
+
+class TestDiscoverSemesters:
+    def test_reads_the_home_page_once(self):
+        fetcher = FakeFetcher()
+        assert discover_semesters(fetcher) == [Semester(115, 1), Semester(114, 2)]
+        assert fetcher.request_count == 1
+
+
+class TestSelectSemesters:
+    def picked(self, out_dir, **kwargs):
+        kwargs.setdefault("now", NOW)
+        return [s for s, _ in select_semesters(AVAILABLE, out_dir, **kwargs)]
+
+    def test_newest_semester_is_always_crawled(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": stamp(0.1)},
+        ])
+        assert self.picked(tmp_path) == [Semester(115, 1)]
+
+    def test_semester_without_data_is_crawled(self, tmp_path):
+        write_meta(tmp_path, [{"year": 115, "sem": 1, "generated_at": stamp(0.1)}])
+        assert self.picked(tmp_path) == AVAILABLE
+
+    def test_stale_older_semester_is_refreshed(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": stamp(30)},
+        ])
+        assert self.picked(tmp_path, refresh_after=24) == AVAILABLE
+
+    def test_fresh_older_semester_is_skipped(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": stamp(3)},
+        ])
+        assert self.picked(tmp_path, refresh_after=24) == [Semester(115, 1)]
+
+    def test_partial_data_does_not_count_as_crawled(self, tmp_path):
+        """--dept 的結果是不完整的,不能讓它擋掉之後的完整抓取。"""
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": stamp(1), "partial": True},
+        ])
+        assert self.picked(tmp_path, refresh_after=24) == AVAILABLE
+
+    def test_force_all_ignores_freshness(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": stamp(0.1)},
+        ])
+        assert self.picked(tmp_path, force_all=True) == AVAILABLE
+
+    def test_unreadable_timestamp_falls_back_to_crawling(self, tmp_path):
+        write_meta(tmp_path, [
+            {"year": 115, "sem": 1, "generated_at": stamp(0.1)},
+            {"year": 114, "sem": 2, "generated_at": "上個禮拜"},
+        ])
+        assert self.picked(tmp_path) == AVAILABLE
+
+    def test_missing_meta_file_crawls_everything(self, tmp_path):
+        assert self.picked(tmp_path) == AVAILABLE
+
+    def test_nothing_available_selects_nothing(self, tmp_path):
+        assert select_semesters([], tmp_path, now=NOW) == []
+
+    def test_semester_no_longer_on_the_home_page_is_left_alone(self, tmp_path):
+        """113-2 已經從首頁下架,不該被抓,資料也不該被動到。"""
+        write_meta(tmp_path, [{"year": 113, "sem": 2, "generated_at": stamp(999)}])
+        assert Semester(113, 2) not in self.picked(tmp_path)
+
+    def test_reason_is_recorded_for_the_log(self, tmp_path):
+        reasons = dict(
+            (s.path, r) for s, r in select_semesters(AVAILABLE, tmp_path, now=NOW)
+        )
+        assert reasons["115-1"] == "最新學期"
+        assert reasons["114-2"] == "尚無資料"
+
+
+class TestAutoModeCli:
+    def test_without_year_and_sem_it_crawls_what_the_site_offers(
+        self, tmp_path, fake_fetcher_factory
+    ):
+        code = main(["--out", str(tmp_path), "--dept", "59", "--log-level", "ERROR"])
+        assert code == 0
+        assert (tmp_path / "115-1").is_dir() and (tmp_path / "114-2").is_dir()
+        meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+        assert [s["path"] for s in meta["semesters"]] == ["115-1", "114-2"]
+
+    def test_explicit_year_and_sem_skips_discovery(
+        self, tmp_path, fake_fetcher_factory
+    ):
+        main([
+            "--year", "115", "--sem", "1",
+            "--out", str(tmp_path), "--dept", "59", "--log-level", "ERROR",
+        ])
+        fetcher = fake_fetcher_factory.created[0]
+        assert (0, None) not in fetcher.calls  # 沒去讀首頁
+        assert not (tmp_path / "114-2").exists()
+
+    def test_year_without_sem_is_rejected(self, tmp_path):
+        with pytest.raises(SystemExit):
+            main(["--year", "115", "--out", str(tmp_path)])

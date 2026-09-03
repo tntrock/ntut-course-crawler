@@ -178,3 +178,28 @@ class ClassGroup:
             "department_id": self.department_id,
             "url": self.url,
         }
+
+
+@dataclass(frozen=True, order=True)
+class Semester:
+    """一個學年期。
+
+    `order=True` 讓它可以直接排序:欄位順序 (year, sem) 就是「新舊」的定義,
+    所以 `sorted(semesters, reverse=True)` 得到的就是「最新的在前面」。
+    frozen 是為了能放進 set / dict key(要判斷「這學期抓過了沒」)。
+    """
+
+    year: int  # 民國學年度,例 115
+    sem: int  # 1 或 2
+
+    @property
+    def path(self) -> str:
+        """輸出目錄名,也是 API 路徑的一段,例 "115-1"。"""
+        return f"{self.year}-{self.sem}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.year} 學年度第 {self.sem} 學期"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"year": self.year, "sem": self.sem, "path": self.path}

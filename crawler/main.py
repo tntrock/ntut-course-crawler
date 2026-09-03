@@ -1,15 +1,19 @@
 """CLI entry point:抓取 → 去重 → 寫出靜態 JSON API。
 
 用法:
+    python -m crawler.main --out data/                  # 自動偵測學年期(預設)
     python -m crawler.main --year 115 --sem 1 --out data/
-    python -m crawler.main --year 115 --sem 1 --out data/ --no-cache --delay 1.5
-    python -m crawler.main --year 115 --sem 1 --out data/ --dept 59   # 開發用
+    python -m crawler.main --out data/ --dept 59 --pretty   # 開發用
+
+學年期不寫死
+------------
+不給 `--year/--sem` 時會先讀課程系統首頁,看學校現在掛了哪幾個「上課時間表」,
+再決定要抓哪些。115-1 過完換 115-2、再換 116-1,程式與 workflow 都不用改。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -18,20 +22,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import BASE_URL, SCHEMA_VERSION
 from .http import Fetcher
-from .models import ClassGroup, Course, Department, requirement_table
+from .models import ClassGroup, Course, Department, Semester
+from .output import read_semester_times, write_outputs
 from .parse_course import parse_courses
 from .parse_dept import parse_class_groups, parse_colleges
-from .periods import period_table
+from .parse_semester import parse_semesters
 
 log = logging.getLogger("crawler")
 
-SOURCE_NAME = "國立臺北科技大學 課程查詢系統"
-DISCLAIMER = (
-    "本資料由非官方爬蟲自動蒐集,僅供參考,"
-    "一切以學校公告與課程系統當下顯示的內容為準。"
-)
+#: 首頁,唯一能問出「現在有哪些學年期」的地方
+HOME_PAGE = "course.jsp"
+
+#: 非最新學期預設多久重抓一次(小時)。過去的學期資料幾乎不再變動,
+#: 每 4 小時全部重抓一次只是白白增加學校的負擔。
+DEFAULT_REFRESH_AFTER = 24.0
 
 
 # --------------------------------------------------------------------------
@@ -48,11 +53,74 @@ class CrawlResult:
     ok_departments: int = 0
     failed_departments: int = 0
     merged_courses: int = 0  # 同課號在多個班級頁重複出現、被合併掉的次數
+    partial: bool = False  # --dept 只抓了部分單位,資料集不完整
     elapsed: float = 0.0
 
     @property
     def semester(self) -> str:
         return f"{self.year}-{self.sem}"
+
+
+def discover_semesters(fetcher: Fetcher) -> list[Semester]:
+    """問學校首頁現在有哪些學年期,新到舊排序。只花一次請求。"""
+    html = fetcher.fetch(HOME_PAGE)
+    semesters = parse_semesters(html)
+    log.info(
+        "首頁列出 %d 個學年期:%s",
+        len(semesters),
+        ", ".join(s.path for s in semesters) or "(無)",
+    )
+    return semesters
+
+
+def select_semesters(
+    available: list[Semester],
+    out_dir: Path,
+    *,
+    refresh_after: float = DEFAULT_REFRESH_AFTER,
+    force_all: bool = False,
+    now: datetime | None = None,
+) -> list[tuple[Semester, str]]:
+    """從可抓的學年期裡挑出這次真的要抓的,並附上原因。
+
+    規則:
+    - **最新的學期一定抓** —— 選課期間資料每天在動,那才是大家要看的。
+    - 還沒有資料的學期抓 —— 新學期一掛出來就立刻補上。
+    - 資料超過 `refresh_after` 小時沒更新的抓 —— 讓舊學期偶爾也對一次,
+      順便修掉先前抓壞的部分。
+    - 其餘跳過。
+
+    首頁已經下架、但本地還有資料的學期不會出現在這裡,也不會被刪 —— 歷史資料留著。
+    """
+    if not available:
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    known = read_semester_times(out_dir)
+    newest = available[0]
+    picked: list[tuple[Semester, str]] = []
+
+    for semester in available:
+        key = (semester.year, semester.sem)
+        stamp = known.get(key)
+
+        if force_all:
+            reason = "--all-semesters"
+        elif semester == newest:
+            reason = "最新學期"
+        elif stamp is None:
+            reason = "尚無資料"
+        else:
+            age = (now - stamp).total_seconds() / 3600
+            if age >= refresh_after:
+                reason = f"資料已 {age:.1f} 小時未更新"
+            else:
+                log.info("略過 %s:資料 %.1f 小時前才更新過", semester.path, age)
+                continue
+
+        picked.append((semester, reason))
+
+    return picked
 
 
 def crawl(
@@ -67,7 +135,7 @@ def crawl(
     單一系所失敗只記錄後繼續,不會拖垮整批(plan.md §3 Phase 4)。
     """
     started = time.monotonic()
-    result = CrawlResult(year=year, sem=sem)
+    result = CrawlResult(year=year, sem=sem, partial=bool(only_departments))
     params = {"year": year, "sem": sem}
 
     overview = fetcher.fetch("Subj.jsp", params={"format": -2, **params})
@@ -166,194 +234,6 @@ def _crawl_department(
 
 
 # --------------------------------------------------------------------------
-# 輸出
-# --------------------------------------------------------------------------
-def write_outputs(result: CrawlResult, out_dir: Path, *, pretty: bool = False) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    semester_dir = out_dir / result.semester
-    semester_dir.mkdir(parents=True, exist_ok=True)
-
-    _write_departments(result, semester_dir, pretty)
-    _write_courses(result, semester_dir, pretty)
-    _write_index(result, out_dir, pretty)
-    _write_meta(result, out_dir, pretty)
-    _write_errors(result, out_dir, pretty)
-
-
-def _write_json(path: Path, payload: dict[str, Any], pretty: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if pretty:
-        text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False)
-    else:
-        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    path.write_text(text + "\n", encoding="utf-8")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("既有的 %s 無法讀取(%s),將整個重建", path.name, exc)
-        return None
-
-
-def _write_departments(result: CrawlResult, semester_dir: Path, pretty: bool) -> None:
-    """學院 / 系所 / 班級三層對照。"""
-    course_counts: dict[str, int] = {}
-    for course in result.courses:
-        for dept_id in course.department_ids:
-            course_counts[dept_id] = course_counts.get(dept_id, 0) + 1
-
-    departments = []
-    for dept in result.departments:
-        payload = dept.to_dict()
-        payload["class_groups"] = [
-            {"id": g.id, "name": g.name, "url": g.url}
-            for g in result.class_groups.get(dept.id, [])
-        ]
-        payload["course_count"] = course_counts.get(dept.id, 0)
-        departments.append(payload)
-
-    _write_json(
-        semester_dir / "departments.json",
-        {
-            "schema_version": SCHEMA_VERSION,
-            "year": result.year,
-            "sem": result.sem,
-            "generated_at": _now(),
-            "departments": departments,
-        },
-        pretty,
-    )
-
-
-def _write_courses(result: CrawlResult, semester_dir: Path, pretty: bool) -> None:
-    """每個系所一個檔,檔名用系所代碼(中文檔名在 Pages 上要 percent-encoding)。"""
-    by_dept: dict[str, list[Course]] = {d.id: [] for d in result.departments}
-    for course in result.courses:
-        for dept_id in course.department_ids:
-            # 合開課程會同時寫進每個開課系所的檔案,讓每個檔都是自足的
-            by_dept.setdefault(dept_id, []).append(course)
-
-    names = {d.id: d for d in result.departments}
-    for dept_id, courses in by_dept.items():
-        dept = names.get(dept_id)
-        _write_json(
-            semester_dir / "courses" / f"{dept_id}.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "year": result.year,
-                "sem": result.sem,
-                "generated_at": _now(),
-                "department": dept.to_dict() if dept else {"id": dept_id},
-                "courses": [c.to_dict() for c in courses],
-            },
-            pretty,
-        )
-
-
-def _index_entry(course: Course, year: int, sem: int) -> dict[str, Any]:
-    """index.json 只放搜尋需要的欄位,細節留在各系所檔。"""
-    return {
-        "id": course.id,
-        "name_zh": course.name_zh,
-        "teachers": list(course.teachers),
-        "time_slots": [s.to_dict() for s in course.time_slots],
-        "department_ids": list(course.department_ids),
-        "credits": course.credits,
-        "year": year,
-        "sem": sem,
-    }
-
-
-def _write_index(result: CrawlResult, out_dir: Path, pretty: bool) -> None:
-    """輕量索引:前端一次載入就能做關鍵字搜尋,不必逐系所請求。
-
-    同一個 out_dir 裡若已有其他學期的索引,會保留;只替換本次學年期的部分。
-    """
-    path = out_dir / "index.json"
-    existing = _read_json(path) or {}
-    kept = [
-        entry
-        for entry in existing.get("courses", [])
-        if (entry.get("year"), entry.get("sem")) != (result.year, result.sem)
-    ]
-    courses = kept + [_index_entry(c, result.year, result.sem) for c in result.courses]
-
-    _write_json(
-        path,
-        {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
-            "course_count": len(courses),
-            "courses": courses,
-        },
-        pretty,
-    )
-
-
-def _write_meta(result: CrawlResult, out_dir: Path, pretty: bool) -> None:
-    path = out_dir / "meta.json"
-    existing = _read_json(path) or {}
-    semesters = [
-        s
-        for s in existing.get("semesters", [])
-        if (s.get("year"), s.get("sem")) != (result.year, result.sem)
-    ]
-    semesters.append(
-        {
-            "year": result.year,
-            "sem": result.sem,
-            "path": result.semester,
-            "generated_at": _now(),
-            "department_count": len(result.departments),
-            "class_group_count": sum(len(g) for g in result.class_groups.values()),
-            "course_count": len(result.courses),
-            "merged_course_count": result.merged_courses,
-            "failed_department_count": result.failed_departments,
-        }
-    )
-    semesters.sort(key=lambda s: (s.get("year", 0), s.get("sem", 0)), reverse=True)
-
-    _write_json(
-        path,
-        {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
-            "source": {"name": SOURCE_NAME, "url": BASE_URL},
-            "disclaimer": DISCLAIMER,
-            "semesters": semesters,
-            "periods": period_table(),
-            "requirement_symbols": requirement_table(),
-        },
-        pretty,
-    )
-
-
-def _write_errors(result: CrawlResult, out_dir: Path, pretty: bool) -> None:
-    """沒有錯誤時也要寫,不然使用者會看到上一輪殘留的錯誤檔。"""
-    _write_json(
-        out_dir / "errors.json",
-        {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
-            "year": result.year,
-            "sem": result.sem,
-            "errors": result.errors,
-        },
-        pretty,
-    )
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
-    )
-
-
-# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -361,14 +241,28 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m crawler.main",
         description="爬取北科大課程系統並輸出靜態 JSON API。",
     )
-    parser.add_argument("--year", type=int, required=True, help="學年度,例 115")
-    parser.add_argument("--sem", type=int, required=True, help="學期,1 或 2")
+    parser.add_argument(
+        "--year", type=int, help="學年度,例 115。不給就自動偵測(要跟 --sem 成對)"
+    )
+    parser.add_argument("--sem", type=int, help="學期,1 或 2。不給就自動偵測")
     parser.add_argument("--out", type=Path, default=Path("data"), help="輸出目錄")
     parser.add_argument(
         "--dept",
         action="append",
         metavar="CODE",
         help="只抓指定系所代碼(可重複),開發用。例:--dept 59",
+    )
+    parser.add_argument(
+        "--refresh-after",
+        type=float,
+        default=DEFAULT_REFRESH_AFTER,
+        metavar="HOURS",
+        help=f"非最新學期隔多久重抓一次(預設 {DEFAULT_REFRESH_AFTER:.0f} 小時)",
+    )
+    parser.add_argument(
+        "--all-semesters",
+        action="store_true",
+        help="首頁列出的每個學年期都重抓,忽略 --refresh-after",
     )
     parser.add_argument(
         "--delay",
@@ -387,40 +281,95 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=args.log_level.upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    if (args.year is None) != (args.sem is None):
+        parser.error("--year 與 --sem 要嘛一起給,要嘛都不給(自動偵測)")
+
     fetcher = Fetcher(delay=args.delay, use_cache=not args.no_cache)
     log.info("延遲 %.2fs / 快取 %s", fetcher.delay, "關閉" if args.no_cache else "開啟")
 
-    result = crawl(fetcher, args.year, args.sem, only_departments=args.dept)
-    write_outputs(result, args.out, pretty=args.pretty)
-
-    _print_summary(result, fetcher, args.out)
-
-    # 只有「全部單位都失敗」才算整體失敗
-    if result.departments and result.ok_departments == 0:
-        log.error("所有單位都抓取失敗")
+    try:
+        targets = _targets(args, fetcher)
+    except Exception as exc:
+        log.error("無法決定要抓哪些學年期:%s", exc)
         return 1
+
+    if not targets:
+        log.warning("沒有需要更新的學年期,結束")
+        return 0
+
+    results: list[CrawlResult] = []
+    for semester, reason in targets:
+        log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
+        result = crawl(
+            fetcher, semester.year, semester.sem, only_departments=args.dept
+        )
+        # 每抓完一個學期就落地,後面的學期失敗也不會賠掉前面的成果
+        write_outputs(result, args.out, pretty=args.pretty)
+        results.append(result)
+
+    _print_summary(results, fetcher, args.out)
+
+    # 只有「某個學期的所有單位都失敗」才算整體失敗
+    for result in results:
+        if result.departments and result.ok_departments == 0:
+            log.error("%s 的所有單位都抓取失敗", result.semester)
+            return 1
     return 0
 
 
-def _print_summary(result: CrawlResult, fetcher: Fetcher, out_dir: Path) -> None:
+def _targets(args: argparse.Namespace, fetcher: Fetcher) -> list[tuple[Semester, str]]:
+    if args.year is not None:
+        return [(Semester(year=args.year, sem=args.sem), "命令列指定")]
+
+    available = discover_semesters(fetcher)
+    if not available:
+        raise RuntimeError("首頁沒有任何上課時間表連結")
+
+    targets = select_semesters(
+        available,
+        args.out,
+        refresh_after=args.refresh_after,
+        force_all=args.all_semesters,
+    )
+    log.info(
+        "本次要抓 %d 個學年期:%s",
+        len(targets),
+        ", ".join(f"{s.path}({r})" for s, r in targets) or "(無)",
+    )
+    return targets
+
+
+def _print_summary(
+    results: list[CrawlResult], fetcher: Fetcher, out_dir: Path
+) -> None:
     index_path = out_dir / "index.json"
     index_size = index_path.stat().st_size / 1024 if index_path.is_file() else 0
 
     print()
-    print(f"學年期        {result.semester}")
-    print(f"單位          成功 {result.ok_departments} / 失敗 {result.failed_departments}")
-    print(f"班級          {sum(len(g) for g in result.class_groups.values())}")
-    print(f"課程(去重後)  {len(result.courses)}(合併掉 {result.merged_courses} 筆重複課號)")
+    for result in results:
+        print(f"學年期        {result.semester}")
+        print(
+            f"單位          成功 {result.ok_departments} / "
+            f"失敗 {result.failed_departments}"
+        )
+        print(f"班級          {sum(len(g) for g in result.class_groups.values())}")
+        print(
+            f"課程(去重後)  {len(result.courses)}"
+            f"(合併掉 {result.merged_courses} 筆重複課號)"
+        )
+        print(f"錯誤          {len(result.errors)}")
+        print(f"耗時          {result.elapsed:.1f}s")
+        print()
+
     print(f"請求 / 快取   {fetcher.request_count} / {fetcher.cache_hit_count}")
-    print(f"錯誤          {len(result.errors)}")
     print(f"index.json    {index_size:.0f} KB")
-    print(f"耗時          {result.elapsed:.1f}s")
     print(f"輸出          {out_dir.resolve()}")
 
 
