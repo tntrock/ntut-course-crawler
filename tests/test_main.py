@@ -21,6 +21,7 @@ from crawler.main import (
     select_semesters,
     write_outputs,
 )
+from crawler.http import SiteUnavailable
 from crawler.models import Semester
 from tests.conftest import load_fixture
 
@@ -33,10 +34,14 @@ class FakeFetcher:
         *,
         fail_on: set[str] | None = None,
         fail_semesters: set[tuple[int, int]] | None = None,
+        unavailable_after: int | None = None,
     ) -> None:
         self.fail_on = fail_on or set()
         # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
         self.fail_semesters = fail_semesters or set()
+        # 抓到第幾個請求時模擬斷路器跳開(None = 從頭到尾都正常)
+        self.unavailable_after = unavailable_after
+        self.unavailable = False
         self.calls: list[tuple[int, str | None]] = []
         self.request_count = 0
         self.cache_hit_count = 0
@@ -48,6 +53,15 @@ class FakeFetcher:
         code = params.get("code")
         self.calls.append((fmt, code))
         self.request_count += 1
+
+        if self.unavailable:
+            raise SiteUnavailable(f"模擬:站台已判定不可用 {url}")
+        if (
+            self.unavailable_after is not None
+            and self.request_count >= self.unavailable_after
+        ):
+            self.unavailable = True
+            raise SiteUnavailable(f"模擬:斷路器在第 {self.request_count} 個請求跳開")
 
         if code in self.fail_on:
             raise RuntimeError(f"模擬 {code} 抓取失敗")
@@ -86,11 +100,14 @@ def fake_fetcher_factory(monkeypatch):
         def __init__(self) -> None:
             self.fail_on: set[str] = set()
             self.fail_semesters: set[tuple[int, int]] = set()
+            self.unavailable_after: int | None = None
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
             fetcher = FakeFetcher(
-                fail_on=self.fail_on, fail_semesters=self.fail_semesters
+                fail_on=self.fail_on,
+                fail_semesters=self.fail_semesters,
+                unavailable_after=self.unavailable_after,
             )
             self.created.append(fetcher)
             return fetcher
@@ -598,3 +615,34 @@ class TestConsecutiveFailureCircuitBreaker:
         # 中止前抓好的 114-2 / 114-1 要留著
         assert (tmp_path / "114-2").is_dir() and (tmp_path / "114-1").is_dir()
         assert not (tmp_path / "112-1").exists()   # 中止後的沒去碰
+
+
+class TestHalfCrawledSemesterIsNotPublished:
+    """斷路器在學期中途跳開時,不可以把半套資料寫出去。
+
+    斷路器讓剩下的單位「直接放棄」而不是「真的去問過」,那些單位的 0 門課
+    是假的。寫出去會蓋掉線上完整的資料,而且 meta.json 會記成「剛更新過」,
+    把之後 24 小時的重試一起擋掉 —— 一次網路中斷變成一天的資料空洞。
+    """
+
+    def test_crawl_raises_instead_of_returning_partial_data(self):
+        # -2 總覽頁 + -3 系所頁抓得到,第 3 個請求(第一個班級頁)開始不可用
+        fetcher = FakeFetcher(unavailable_after=3)
+        with pytest.raises(SiteUnavailable):
+            crawl(fetcher, 115, 1, only_departments=["59"])
+
+    def test_nothing_is_written_for_that_semester(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.unavailable_after = 3
+        main(["--year", "115", "--sem", "1", "--out", str(tmp_path),
+              "--log-level", "CRITICAL"])
+        assert not (tmp_path / "115-1").exists()
+        assert not (tmp_path / "meta.json").exists(), "meta.json 記了就會擋住重試"
+
+    def test_the_failure_lands_in_errors_json(self, tmp_path, fake_fetcher_factory):
+        fake_fetcher_factory.unavailable_after = 3
+        main(["--year", "115", "--sem", "1", "--out", str(tmp_path),
+              "--log-level", "CRITICAL"])
+        errors = json.loads((tmp_path / "errors.json").read_text(encoding="utf-8"))
+        assert errors["error_count"] == 1
+        assert errors["errors"][0]["stage"] == "semester"
+        assert "SiteUnavailable" in errors["errors"][0]["error"]

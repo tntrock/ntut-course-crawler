@@ -39,6 +39,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | **某個學程**有哪些課 | `{semester}/programs.json` | |
 | **某間教室**排了什麼課 | `{semester}/classrooms.json` | |
 | **星期幾第幾節**有什麼課（找空堂、擋修衝堂） | `{semester}/schedule.json` | |
+| 上次抓取有沒有課異動（加開、停開、調課、換老師） | `changes.json` | |
 
 不知道代碼？先拉 `{semester}/departments.json`、`teachers.json`、`classes.json`，
 每一筆都附了 `path` 欄位，直接接在 base URL 後面就是明細檔的網址。
@@ -50,6 +51,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 13 KB |
 | `index.json` | **最新兩個學期**的課程輕量索引 | 1.5 MB（gzip 149 KB）|
 | `errors.json` | 各學期抓取失敗的單位（目前 51 個學期全部為空） | < 1 KB |
+| `changes.json` | 最近幾次抓取偵測到的課程異動（見下） | 隨異動量變動 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
 | `{semester}/courses/{department_id}.json` | 系所課表（完整課程物件） | 60 檔，共 1.5 MB |
@@ -69,6 +71,46 @@ https://tntrock.github.io/ntut-course-crawler/
 
 `programs.json` / `classrooms.json` / `schedule.json` 只放課號 —— 拿課號去
 `{semester}/index.json` 或系所明細檔查即可，避免同一份課程資料被複製太多份。
+
+### `changes.json`：課程異動紀錄
+
+排程每 4 小時重跑一次，但**大部分時候資料一個字都沒變**。光看檔案時間戳
+分不出「只是重跑」和「學校真的動了課」，要確認就得自己下載前後兩版來 diff。
+`changes.json` 就是把這件事寫下來。
+
+每次抓完會拿新結果跟**上一輪的 `index.json`** 比對，只有真的有差異才追加一筆：
+
+```json
+{
+  "generated_at": "2026-09-04T12:03:11Z",
+  "semester": "115-1",
+  "course_count": 2454,
+  "previous_course_count": 2455,
+  "added_count": 0,
+  "removed_count": 1,
+  "modified_count": 2,
+  "added": [],
+  "removed": [{ "id": "364899", "name_zh": "數位影像處理", "teachers": ["白敦文"], ... }],
+  "modified": [
+    {
+      "id": "364893",
+      "name_zh": "計算機概論",
+      "fields": { "teachers": { "from": ["王正豪"], "to": ["王正豪", "陳香君"] } }
+    }
+  ]
+}
+```
+
+- 最新的紀錄在 `changes[0]`，最多保留 200 筆。
+- 比對的欄位是課名、教師、時段、學分、必選修、開課系所、班級。
+- **只有最新兩個學期有紀錄** —— 比對基準是頂層 `index.json`，它只涵蓋那兩個。
+  第一次抓到某個學期時沒有基準可比，會記成 `"baseline": true` 而不是
+  「新增兩千多門課」。
+- 單一類別的明細超過 100 筆會截斷，末尾補一筆 `{"truncated": N}`；
+  `*_count` 一定是真實數量。
+
+異動量突然暴增（例如幾百門課同時「消失」）通常不是學校真的動了那麼多，
+而是版面改了或抓歪了 —— 那是該去看 Actions 記錄的訊號。
 
 ### 為什麼檔名是代碼而不是中文？
 
@@ -603,8 +645,34 @@ CI 就不會把解錯的資料發布出去。
 - 非最新學期預設 24 小時才重抓一次，不會每 4 小時把所有學期重掃一遍
 - 歷史學期（回補下來的）抓過就永久跳過，25 年的資料只會被抓一次
 - User-Agent 帶專案網址，方便校方辨識與聯絡
+- 對方連不上時**整個停手**：連續 3 個網址重試到底仍然失敗，就判定學校端
+  目前不可用，本次執行剩下的請求一律直接放棄、不再重試（見下）
 
 課程網站抓太快很容易被封鎖。這些限制不是效能問題，是能不能長久運作的問題。
+
+### 連線逾時與重試
+
+runner 在美國，跨太平洋連學校主機，偶爾會整段路由抖掉。2026-09-04 08:33 UTC
+那次排程就是連續 4 次 TCP connect 逾時、55 秒後整個 run 失敗，而同一時間
+從台灣連是通的。所以：
+
+| 設定 | 值 | 在 `crawler/config.py` |
+|---|---|---|
+| connect / read timeout | 30 秒 / 60 秒 | `TIMEOUT` |
+| 一輪重試幾次 | 4（輪內退避 2 / 4 / 8 秒） | `RETRY_ATTEMPTS_PER_ROUND` |
+| 總共幾輪 | 2 | `RETRY_ROUNDS` |
+| 輪與輪之間等多久 | 180 秒 | `RETRY_ROUND_PAUSE` |
+| 連續幾個網址全滅就判定站台不可用 | 3 | `UNAVAILABLE_AFTER` |
+
+一輪打完全滅通常不是那個網址有問題，而是對方當下整個不可用。這種時候
+密集重試既沒用也不禮貌，不如停下來等 3 分鐘再來一輪。
+
+最後那道閘是配套：沒有它，「每個網址都撐很久」會讓一次全站中斷變成
+幾百個網址各耗好幾分鐘、把 runner 燒到 job 逾時。判定不可用之後，
+**抓到一半的學期不會被寫出去** —— 那些單位的「0 門課」是放棄去問，
+不是真的沒開課，寫出去會蓋掉線上完整的資料，還會讓 `meta.json` 記成
+「剛更新過」而擋掉之後 24 小時的重試。失敗會記進 `errors.json`，
+下次排程重來。
 
 ### 架構
 

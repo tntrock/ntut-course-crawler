@@ -44,6 +44,29 @@ DISCLAIMER = (
 #: 一律先驗證再拿去組路徑,免得哪天頁面壞掉就寫出 `../../etc` 這種檔名。
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+#: changes.json 最多保留幾筆變更紀錄。一天 6 次排程、只有真的有異動才記一筆,
+#: 200 筆大概是好幾個月份 —— 夠人工回溯,又不會讓檔案無限長大。
+CHANGE_LOG_LIMIT = 200
+
+#: 單筆紀錄裡每一類異動最多列幾門課的明細。學校端的正常異動是個位數;
+#: 一次幾百筆通常代表版面改了或抓歪了,那種情況列出全部只會洗版,
+#: 看 count 就夠判斷「該去查了」。
+CHANGE_DETAIL_LIMIT = 100
+
+#: 拿來判斷「這門課有沒有變」的欄位。取自索引項目 —— 索引本來就是
+#: 「篩選 / 搜尋會用到」的那些欄位,剛好也就是異動了會影響到人的那些。
+#: 刻意不比 `teacher_codes`(跟 `teachers` 連動)。
+_TRACKED_FIELDS = (
+    "name_zh",
+    "teachers",
+    "time_slots",
+    "credits",
+    "required",
+    "requirement_type",
+    "department_ids",
+    "class_ids",
+)
+
 #: 每次完整抓取都會整個重建的子目錄。不先清掉的話,
 #: 上一輪留下的班級 / 教師檔會變成永遠不會更新的幽靈資料。
 _REBUILT_SUBDIRS = ("courses", "teachers", "classes")
@@ -75,6 +98,8 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_semester_index(result, semester_dir, pretty)
 
     # 跨學期
+    # 變更紀錄要先算 —— 它的比對基準就是還沒被蓋掉的舊 index.json
+    _write_changes(result, out_dir, pretty)
     _write_index(result, out_dir, pretty)
     _write_meta(result, out_dir, pretty)
     _write_errors(result, out_dir, pretty)
@@ -464,6 +489,148 @@ def _write_semester_index(
     _write_json(semester_dir / "index.json", payload, pretty)
 
 
+# --------------------------------------------------------------------------
+# 變更紀錄
+# --------------------------------------------------------------------------
+def _write_changes(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
+    """把這一輪相對於上一輪的課程異動追加進 `changes.json`。
+
+    每 4 小時跑一次、每次都重寫一整包 JSON,光看檔案時間戳根本不知道
+    「這次到底改了什麼」——「115-1 少了一門課」這種事只能靠下載前後兩版
+    自己 diff 才看得出來。這個檔就是為了讓那件事變成用眼睛看的。
+
+    比對基準是**上一輪的頂層 `index.json`**(所以必須在 `_write_index`
+    覆蓋它之前呼叫)。基準只涵蓋最新的 `INDEX_SEMESTERS` 個學期,回補歷史
+    學期時沒有東西可比,會記成一筆 baseline 而不是「新增兩千多門課」。
+
+    **沒有異動就不寫**。一天 6 次排程,課程多半原封不動;每次都追加一筆
+    「沒變」只會把真正的異動洗掉。
+    """
+    if result.partial:
+        # --dept 只抓了幾個系所,拿它跟全校的索引比會得到「移除兩千門課」
+        log.info("局部抓取(--dept),略過變更紀錄")
+        return
+
+    baseline = _previous_index_entries(out_dir, result.year, result.sem)
+    current = {c.id: _index_entry(c, result.year, result.sem) for c in result.courses}
+
+    entry: dict[str, Any] = {
+        "generated_at": _now(),
+        "semester": result.semester,
+        "year": result.year,
+        "sem": result.sem,
+        "course_count": len(current),
+    }
+
+    if baseline is None:
+        # 第一次抓這個學期,或它已經被擠出頂層索引的涵蓋範圍
+        log.info("%s 沒有可比對的基準,記為 baseline", result.semester)
+        entry["baseline"] = True
+        _append_change(out_dir, entry, pretty)
+        return
+
+    added = sorted(set(current) - set(baseline))
+    removed = sorted(set(baseline) - set(current))
+    modified = [
+        {"id": cid, "name_zh": current[cid].get("name_zh"), "fields": diff}
+        for cid in sorted(set(current) & set(baseline))
+        if (diff := _diff_fields(baseline[cid], current[cid]))
+    ]
+
+    if not (added or removed or modified):
+        log.info("%s 與上一輪完全相同,不記變更", result.semester)
+        return
+
+    log.info(
+        "%s 異動:新增 %d / 移除 %d / 內容變更 %d(對照上一輪索引,%d → %d 門課)",
+        result.semester,
+        len(added),
+        len(removed),
+        len(modified),
+        len(baseline),
+        len(current),
+    )
+
+    entry["previous_course_count"] = len(baseline)
+    entry["added_count"] = len(added)
+    entry["removed_count"] = len(removed)
+    entry["modified_count"] = len(modified)
+    entry["added"] = _capped([_brief(current[cid]) for cid in added])
+    entry["removed"] = _capped([_brief(baseline[cid]) for cid in removed])
+    entry["modified"] = _capped(modified)
+    _append_change(out_dir, entry, pretty)
+
+
+def _previous_index_entries(
+    out_dir: Path, year: int, sem: int
+) -> dict[str, dict[str, Any]] | None:
+    """上一輪頂層索引裡屬於這個學年期的課程,課號 → 索引項目。
+
+    完全沒有這個學年期的資料時回 `None`(而不是空 dict)—— 「上一輪有零門課」
+    和「上一輪根本沒抓過」對變更紀錄來說是完全不同的兩件事。
+    """
+    index = _read_json(Path(out_dir) / "index.json")
+    if not index:
+        return None
+    entries = {
+        entry["id"]: entry
+        for entry in index.get("courses", [])
+        if isinstance(entry, dict)
+        and entry.get("id")
+        and (entry.get("year"), entry.get("sem")) == (year, sem)
+    }
+    return entries or None
+
+
+def _diff_fields(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """回傳有變動的欄位與前後值。沒變就是空 dict。"""
+    return {
+        field: {"from": before.get(field), "to": after.get(field)}
+        for field in _TRACKED_FIELDS
+        if before.get(field) != after.get(field)
+    }
+
+
+def _brief(entry: dict[str, Any]) -> dict[str, Any]:
+    """新增 / 移除的課只留認得出是哪一門的欄位,細節去索引查。"""
+    return {
+        "id": entry.get("id"),
+        "name_zh": entry.get("name_zh"),
+        "teachers": entry.get("teachers", []),
+        "department_ids": entry.get("department_ids", []),
+        "class_ids": entry.get("class_ids", []),
+    }
+
+
+def _capped(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """明細太長就截斷,並在最後補一筆說明還有多少沒列。"""
+    if len(items) <= CHANGE_DETAIL_LIMIT:
+        return items
+    return items[:CHANGE_DETAIL_LIMIT] + [
+        {"truncated": len(items) - CHANGE_DETAIL_LIMIT}
+    ]
+
+
+def _append_change(out_dir: Path, entry: dict[str, Any], pretty: bool) -> None:
+    """把一筆紀錄追加到最前面,並砍掉超過上限的舊紀錄。"""
+    path = Path(out_dir) / "changes.json"
+    existing = _read_json(path) or {}
+    changes = [c for c in existing.get("changes", []) if isinstance(c, dict)]
+    changes.insert(0, entry)  # 最新的在最前面
+    changes = changes[:CHANGE_LOG_LIMIT]
+
+    _write_json(
+        path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "change_count": len(changes),
+            "changes": changes,
+        },
+        pretty,
+    )
+
+
 def _write_index(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
     """跨學期的總索引。
 
@@ -561,7 +728,8 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "{semester}/programs.json", "description": "學程 → 課號"},
         {"path": "{semester}/classrooms.json", "description": "教室 → 課號"},
         {"path": "{semester}/schedule.json", "description": "星期 × 節次 → 課號"},
-        {"path": "errors.json", "description": "最近一次抓取失敗的單位"},
+        {"path": "errors.json", "description": "各學期抓取失敗的單位"},
+        {"path": "changes.json", "description": "最近幾次抓取偵測到的課程異動"},
     ]
 
 

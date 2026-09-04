@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .http import Fetcher
+from .http import Fetcher, SiteUnavailable
 from .models import ClassGroup, Course, Department, Semester
 from .output import read_semester_times, write_outputs, write_semester_failure
 from .parse_course import parse_courses
@@ -235,6 +235,16 @@ def crawl(
 
         result.class_groups[dept.id] = groups
         result.ok_departments += 1
+
+    if fetcher.unavailable:
+        # 斷路器在這個學期抓到一半跳開了。後面那些單位的「0 門課」是「放棄去問」,
+        # 不是「真的沒開課」—— 把這種半套結果寫出去會蓋掉線上完整的資料,
+        # 而且 meta.json 會記成「這學期剛更新過」,擋住之後 24 小時的重試。
+        # 當成整個學期失敗往上拋,由呼叫端記進 errors.json 並中止本批。
+        raise SiteUnavailable(
+            f"{result.semester} 抓到一半站台就不可用了"
+            f"(已完成 {result.ok_departments}/{len(departments)} 個單位),不輸出半套資料"
+        )
 
     result.courses = sorted(merged.values(), key=lambda c: c.id)
     result.elapsed = time.monotonic() - started

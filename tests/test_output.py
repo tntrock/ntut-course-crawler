@@ -286,3 +286,162 @@ class TestIndexCoverage:
         before = (tmp_path / "index.json").read_bytes()
         write_outputs(crawl(FakeFetcher(), 95, 1, only_departments=["59"]), tmp_path)
         assert (tmp_path / "index.json").read_bytes() == before
+
+
+class TestChangeLog:
+    """`changes.json`:讓「這次跑完到底改了什麼」用眼睛就看得出來。
+
+    每 4 小時重寫一整包 JSON,光看檔案時間戳分不出「重跑了」和「真的變了」。
+    人工要確認學校是不是動了課,不該只能自己下載前後兩版來 diff。
+    """
+
+    @pytest.fixture
+    def full(self):
+        """一份完整(非 --dept)的抓取結果,可以直接改了再寫一次。"""
+
+        def make():
+            result = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+            result.partial = False  # 讓它看起來像完整抓取,才會產生變更紀錄
+            return result
+
+        return make
+
+    def log(self, out):
+        return read(out / "changes.json")["changes"]
+
+    def test_first_run_is_recorded_as_a_baseline(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        entries = self.log(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["baseline"] is True
+        assert entries[0]["semester"] == "115-1"
+        assert entries[0]["course_count"] == 6
+        # baseline 沒有基準可比,不該憑空報「新增 6 門課」
+        assert "added" not in entries[0]
+
+    def test_an_unchanged_rerun_appends_nothing(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        write_outputs(full(), tmp_path)
+        assert len(self.log(tmp_path)) == 1, "一天 6 次「沒變」會把真正的異動洗掉"
+
+    def test_a_removed_course_is_recorded(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        gone = second.courses.pop(0)
+        write_outputs(second, tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert latest["removed_count"] == 1
+        assert latest["added_count"] == 0
+        assert latest["removed"][0]["id"] == gone.id
+        assert latest["removed"][0]["name_zh"] == gone.name_zh
+        assert latest["previous_course_count"] == 6
+        assert latest["course_count"] == 5
+
+    def test_an_added_course_is_recorded(self, tmp_path, full):
+        # 先用少一門的當基準,再寫完整的,等同於「學校加開了一門」
+        before = full()
+        newcomer = before.courses.pop()
+        write_outputs(before, tmp_path)
+        write_outputs(full(), tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert latest["added_count"] == 1
+        assert latest["removed_count"] == 0
+        assert latest["added"][0]["id"] == newcomer.id
+        assert latest["added"][0]["name_zh"] == newcomer.name_zh
+
+    def test_a_changed_teacher_shows_the_before_and_after(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        target = second.courses[0]
+        target.teachers = ["新老師"]
+        target.teacher_codes = ["99999"]
+        write_outputs(second, tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert latest["modified_count"] == 1
+        entry = latest["modified"][0]
+        assert entry["id"] == target.id
+        assert entry["fields"]["teachers"]["to"] == ["新老師"]
+        assert entry["fields"]["teachers"]["from"] != ["新老師"]
+        # 沒動到的欄位不該出現
+        assert "credits" not in entry["fields"]
+
+    def test_a_changed_time_slot_is_caught(self, tmp_path, full):
+        """調課是最需要被看見的異動之一。"""
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        target = next(c for c in second.courses if c.time_slots)
+        target.time_slots = []
+        write_outputs(second, tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert "time_slots" in latest["modified"][0]["fields"]
+
+    def test_newest_record_comes_first(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        second = full()
+        second.courses.pop(0)
+        write_outputs(second, tmp_path)
+
+        entries = self.log(tmp_path)
+        assert len(entries) == 2
+        assert entries[0]["removed_count"] == 1
+        assert entries[1]["baseline"] is True
+
+    def test_old_records_are_dropped_at_the_limit(self, tmp_path, full, monkeypatch):
+        monkeypatch.setattr("crawler.output.CHANGE_LOG_LIMIT", 3)
+        for n in range(6):
+            result = full()
+            # 每一輪都拿掉不同數量的課,確保每次都有異動可記
+            result.courses = result.courses[: 6 - n]
+            write_outputs(result, tmp_path)
+
+        entries = self.log(tmp_path)
+        assert len(entries) == 3
+        assert entries[0]["course_count"] == 1, "留下的要是最新的那幾筆"
+
+    def test_long_detail_lists_are_truncated(self, tmp_path, full, monkeypatch):
+        monkeypatch.setattr("crawler.output.CHANGE_DETAIL_LIMIT", 2)
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        second.courses = second.courses[:1]  # 一口氣少 5 門
+        write_outputs(second, tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert latest["removed_count"] == 5, "count 一定要是真實數量"
+        assert len(latest["removed"]) == 3  # 2 筆明細 + 1 筆截斷說明
+        assert latest["removed"][-1] == {"truncated": 3}
+
+    def test_partial_crawls_never_write_a_change_record(self, tmp_path, full):
+        """--dept 只抓幾個系所,拿它跟全校索引比會得到「移除兩千門課」。"""
+        write_outputs(full(), tmp_path)
+
+        partial = full()
+        partial.partial = True
+        partial.courses = partial.courses[:1]
+        write_outputs(partial, tmp_path)
+
+        assert len(self.log(tmp_path)) == 1
+
+    def test_a_backfilled_old_semester_is_a_baseline_not_a_mass_add(self, tmp_path, full):
+        """回補歷史學期時,頂層索引裡沒有它 —— 那是「第一次抓」,不是「新增」。"""
+        write_outputs(full(), tmp_path)
+
+        old = crawl(FakeFetcher(), 100, 1, only_departments=["59"])
+        old.partial = False
+        write_outputs(old, tmp_path)
+
+        latest = self.log(tmp_path)[0]
+        assert latest["semester"] == "100-1"
+        assert latest["baseline"] is True
+
+    def test_meta_advertises_the_endpoint(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        paths = {e["path"] for e in read(tmp_path / "meta.json")["endpoints"]}
+        assert "changes.json" in paths

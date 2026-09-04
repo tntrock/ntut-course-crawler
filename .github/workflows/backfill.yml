@@ -56,7 +56,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json; do
+            for f in meta.json index.json errors.json changes.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"

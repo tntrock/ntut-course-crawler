@@ -59,15 +59,15 @@ jobs:
       - name: Test
         run: pytest -q
 
-      # 只撈三個跨學期的檔案,不是整包 —— 理由見 restore-note.md。
-      # --sparse 只 checkout 根目錄下的檔案,正好就是這三個;歷史學期的
+      # 只撈四個跨學期的檔案,不是整包 —— 理由見 restore-note.md。
+      # --sparse 只 checkout 根目錄下的檔案,正好就是這幾個;歷史學期的
       # 幾千個檔連 blob 都不會下載。發布用 keep_files,它們也不必在本機出現。
       - name: Restore shared index files
         if: ${{ !inputs.rebuild }}
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json; do
+            for f in meta.json index.json errors.json changes.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"

@@ -23,7 +23,11 @@ from .config import (
     CACHE_DIR,
     DEFAULT_DELAY,
     MIN_DELAY,
+    RETRY_ATTEMPTS_PER_ROUND,
+    RETRY_ROUND_PAUSE,
+    RETRY_ROUNDS,
     TIMEOUT,
+    UNAVAILABLE_AFTER,
     USER_AGENT,
 )
 
@@ -63,8 +67,11 @@ from tenacity import (  # noqa: E402
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
 )
+
+#: 會被當成「對方暫時不可用」而重試的例外。4xx 不在裡面 —— 那是我們自己
+#: 的請求有問題(或被擋),重試只會擋得更死。
+TRANSIENT = (requests.Timeout, requests.ConnectionError)
 
 
 class FetchError(Exception):
@@ -87,6 +94,33 @@ class ServerError(FetchError):
         super().__init__(f"HTTP {status}: {url}")
         self.status = status
         self.url = url
+
+
+class SiteUnavailable(FetchError):
+    """斷路器已跳開:同一次執行裡不再對這個站台發任何請求。
+
+    連續 `UNAVAILABLE_AFTER` 個網址重試到底都失敗之後,`Fetcher` 就會用
+    這個例外直接回絕後續請求。上層的容錯邏輯(單位層、學期層)照常接住,
+    只是不必再等每個網址各自耗完整套重試。
+    """
+
+
+def _wait_between_attempts(state) -> float:
+    """輪內指數退避,輪與輪之間長休息。
+
+    `attempt_number` 是剛失敗那次的編號(1-based)。剛好打完一輪時
+    (整除 `RETRY_ATTEMPTS_PER_ROUND`)代表短間隔的重試已經全滅,
+    改成等 `RETRY_ROUND_PAUSE` 秒再開新的一輪。
+    """
+    position = state.attempt_number % RETRY_ATTEMPTS_PER_ROUND
+    if position == 0:
+        log.warning(
+            "連續 %d 次都失敗,等 %.0f 秒後再試一輪",
+            RETRY_ATTEMPTS_PER_ROUND,
+            RETRY_ROUND_PAUSE,
+        )
+        return RETRY_ROUND_PAUSE
+    return float(min(2 * 2 ** (position - 1), 30))
 
 
 def resolve_delay(delay: float | None = None) -> float:
@@ -132,6 +166,9 @@ class Fetcher:
         # 統計,給結束摘要用
         self.request_count = 0
         self.cache_hit_count = 0
+        # 斷路器:連續幾個網址重試到底仍然失敗、以及是否已經判定站台不可用
+        self.consecutive_failures = 0
+        self.unavailable = False
 
     # -- 快取 ---------------------------------------------------------------
     def _cache_paths(self, url: str) -> tuple[Path, Path]:
@@ -164,11 +201,9 @@ class Fetcher:
 
     # -- 實際請求 -----------------------------------------------------------
     @retry(
-        retry=retry_if_exception_type(
-            (ServerError, requests.Timeout, requests.ConnectionError)
-        ),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type((ServerError, *TRANSIENT)),
+        stop=stop_after_attempt(RETRY_ATTEMPTS_PER_ROUND * RETRY_ROUNDS),
+        wait=_wait_between_attempts,
         reraise=True,
     )
     def _request(self, url: str) -> str:
@@ -200,14 +235,44 @@ class Fetcher:
             log.debug("快取命中:%s", full_url)
             return cached
 
+        if self.unavailable:
+            raise SiteUnavailable(f"站台已判定不可用,不再嘗試:{full_url}")
+
         log.info("GET %s", full_url)
-        html = self._request(full_url)
+        try:
+            html = self._request(full_url)
+        except (ServerError, *TRANSIENT) as exc:
+            self._record_failure(full_url, exc)
+            raise
+        self.consecutive_failures = 0
         self.request_count += 1
         self._cache_write(full_url, html)
 
         # sleep 放在請求「之後」:先付出等待,才輪到下一個請求
         time.sleep(self.delay)
         return html
+
+    def _record_failure(self, url: str, exc: Exception) -> None:
+        """記一次「重試到底仍然失敗」,必要時跳開斷路器。
+
+        只有連線層級的失敗算數。4xx 走不到這裡 —— 那代表對方其實是活的。
+        """
+        self.consecutive_failures += 1
+        log.error(
+            "重試 %d 次仍然失敗(第 %d 個連續失敗的網址):%s —— %s",
+            RETRY_ATTEMPTS_PER_ROUND * RETRY_ROUNDS,
+            self.consecutive_failures,
+            url,
+            exc,
+        )
+        if self.consecutive_failures >= UNAVAILABLE_AFTER and not self.unavailable:
+            self.unavailable = True
+            log.error(
+                "連續 %d 個網址都抓不到,判定學校端目前整體不可用。"
+                "本次執行剩下的請求一律直接失敗,不再重試 —— "
+                "已經抓好的資料不受影響,下次執行會重來。",
+                self.consecutive_failures,
+            )
 
 
 # --------------------------------------------------------------------------
