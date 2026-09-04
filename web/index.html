@@ -70,7 +70,7 @@
   <div class="stat"><b id="s-sem">—</b><span>個學期</span></div>
   <div class="stat"><b id="s-course">—</b><span>門課程</span></div>
   <div class="stat"><b id="s-range">—</b><span>涵蓋範圍</span></div>
-  <div class="stat"><b id="s-time">—</b><span>最後更新 (UTC)</span></div>
+  <div class="stat"><b id="s-time">—</b><span>最後更新 (UTC+8)</span></div>
 </div>
 
 <h2>馬上試</h2>
@@ -135,6 +135,16 @@ console.log(dept.course_count, dept.courses[0].name_zh);</code></pre>
 </main>
 
 <script>
+// generated_at 是 UTC(結尾的 Z),顯示時換成台灣時間。
+function taipei(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "—";
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(d).replace(/\//g, "-");
+}
+
 (async () => {
   try {
     const meta = await (await fetch("meta.json", { cache: "no-cache" })).json();
@@ -145,9 +155,8 @@ console.log(dept.course_count, dept.courses[0].name_zh);</code></pre>
     document.getElementById("s-sem").textContent = sems.length;
     document.getElementById("s-course").textContent = total.toLocaleString("en-US");
     document.getElementById("s-range").textContent =
-      paths[paths.length - 1] + " – " + meta.latest;
-    document.getElementById("s-time").textContent =
-      (meta.generated_at || "").replace("T", " ").replace("Z", "");
+      paths[paths.length - 1] + " → " + meta.latest;
+    document.getElementById("s-time").textContent = taipei(meta.generated_at);
     document.getElementById("stats").hidden = false;
   } catch (e) {
     /* 統計拿不到就不顯示,頁面其餘部分照常 */
