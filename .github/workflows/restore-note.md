@@ -15,5 +15,10 @@
 而且它們也不需要在本機出現 —— 發布時用 `keep_files: true`，
 不在 `publish_dir` 裡的檔案會原封不動留在分支上。
 
-用 `--filter=blob:none --no-checkout` 做 partial clone，只下載這三個檔的內容，
-不動其餘幾千個檔案的 blob。
+用 `--depth 1 --filter=blob:none --sparse` 做 partial clone。`--sparse` 的預設
+sparse-checkout 只取**根目錄下的檔案**，正好就是這三個；歷史學期在子目錄裡的
+幾千個檔連 blob 都不會下載。
+
+> 不要改用 `--no-checkout` 搭配 `git checkout HEAD -- <path>`。blobless clone 在
+> 那條路徑上不會觸發 lazy fetch，只會以 `error: unable to read sha1 file` 收場
+> —— 這個組合實際踩過。

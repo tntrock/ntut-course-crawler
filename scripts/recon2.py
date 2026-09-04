@@ -21,7 +21,7 @@ truststore.inject_into_ssl()
 import requests
 
 BASE = "https://aps.ntut.edu.tw/course/tw/"
-UA = "ntut-course-crawler/0.1 (recon; contact: a940125@gmail.com)"
+UA = "ntut-course-crawler/0.1 (recon; +https://github.com/tntrock/ntut-course-crawler)"
 DELAY_SECONDS = 2.0
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 

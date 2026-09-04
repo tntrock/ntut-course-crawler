@@ -1,0 +1,17 @@
+version: 2
+
+# 只顧 GitHub Actions。Actions 每隔一陣子就會淘汰一次 Node runtime,
+# 舊版 action 會先跳棄用警告、再直接停用 —— 這支排程 4 小時跑一次,
+# 不能等到壞了才發現。
+#
+# 沒有納入 pip:requirements.txt 用的是 `>=` 下限而非精確版號,
+# dependabot 在這種寫法下開不出有意義的升版 PR,只會製造噪音。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies

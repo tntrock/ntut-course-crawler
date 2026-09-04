@@ -114,6 +114,13 @@ jobs:
           fi
           python -m crawler.main "${args[@]}"
 
+      # 首頁。gh-pages 根目錄沒有 index.html 的話,GitHub Pages 會退而直接把
+      # 1.5 MB 的 index.json 吐給訪客 —— 那不是給人看的東西。
+      # 用 keep_files 發布,所以這個檔在兩支 workflow 之間會一直留著,
+      # 但兩邊都複製一份比較保險(rebuild 會把根目錄清掉重來)。
+      - name: Add landing page
+        run: cp web/index.html data/index.html
+
       - name: Upload data as artifact
         if: always()
         uses: actions/upload-artifact@v7

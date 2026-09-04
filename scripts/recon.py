@@ -21,7 +21,7 @@ truststore.inject_into_ssl()  # verify via OS cert store; school's cert trips
 import requests
 
 BASE = "https://aps.ntut.edu.tw/course/tw/"
-UA = "ntut-course-crawler/0.1 (recon; contact: a940125@gmail.com)"
+UA = "ntut-course-crawler/0.1 (recon; +https://github.com/tntrock/ntut-course-crawler)"
 DELAY_SECONDS = 2.0  # deliberately generous for a one-off recon run
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 

@@ -1,5 +1,7 @@
 # ntut-course-crawler
 
+[![test](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml) [![crawl](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml)
+
 國立臺北科技大學課程資料的**非官方**靜態 API。
 
 每 4 小時自動爬取學校課程查詢系統，轉成結構化 JSON 後發布到 GitHub Pages。
@@ -8,7 +10,7 @@
 資料依**系所 / 教師 / 班級 / 學程 / 教室 / 時段**分別建索引，
 查一位老師的課不必先下載全校兩千多門課。
 
-涵蓋 **90 學年度至今**（民國 90 年起，約 25 年）。
+涵蓋 **90-1 至 115-1 共 51 個學期、140,756 門課**（民國 90 年起，約 25 年）。
 
 ---
 
@@ -19,6 +21,10 @@ https://tntrock.github.io/ntut-course-crawler/
 ```
 
 > 下面所有路徑都是相對於這個 base URL。`{semester}` 例如 `115-1`。
+
+所有回應都帶 `Access-Control-Allow-Origin: *`，**瀏覽器可以直接跨網域 `fetch()`**，
+不需要 proxy。`Content-Type` 是 `application/json; charset=utf-8`，
+`Cache-Control` 是 `max-age=600`（GitHub Pages 的設定，本專案改不了）。
 
 ## 我想查…
 
@@ -41,9 +47,9 @@ https://tntrock.github.io/ntut-course-crawler/
 
 | 路徑 | 內容 | 115-1 實際大小 |
 |---|---|---|
-| `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 2 KB |
+| `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 13 KB |
 | `index.json` | **最新兩個學期**的課程輕量索引 | 1.5 MB（gzip 149 KB）|
-| `errors.json` | 最近一次抓取失敗的單位（正常是空陣列） | < 1 KB |
+| `errors.json` | 各學期抓取失敗的單位（目前 51 個學期全部為空） | < 1 KB |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
 | `{semester}/courses/{department_id}.json` | 系所課表（完整課程物件） | 60 檔，共 1.5 MB |
@@ -54,6 +60,8 @@ https://tntrock.github.io/ntut-course-crawler/
 | `{semester}/programs.json` | 學程 → 課號 | 16 KB |
 | `{semester}/classrooms.json` | 教室 → 課號 | 51 KB |
 | `{semester}/schedule.json` | 星期 × 節次 → 課號 | 55 KB |
+
+> 根目錄 `/` 是一頁靜態說明頁。要拿最新兩個學期的索引請明確打 `/index.json`。
 
 **明細檔**（`courses/` `teachers/` `classes/`）放完整課程物件，拿到就能直接顯示，
 不必再載別的檔對照。**清單檔**（`teachers.json` `classes.json` …）只放
@@ -222,7 +230,9 @@ https://tntrock.github.io/ntut-course-crawler/
 
 **教師以代碼為準，不是姓名。** 115-1 有 803 個教師代碼但只有 801 個不同姓名 ——
 確實有同名老師，用姓名分組會把兩個人的課混在一起。
-沒有 `Teach.jsp` 連結的課（少數體育、班週會類）在清單裡的 `id` 與 `path` 為 `null`。
+程式對「有姓名但沒有 `Teach.jsp` 連結」的老師會輸出 `id` 與 `path` 為 `null`，
+但實際資料裡沒有這種情形（90-1 至 115-1 抽查皆為 0 筆）——
+沒有指定教師的課（115-1 有 504 門，多為班週會）根本不會產生教師條目。
 
 ### `115-1/classes.json` → `115-1/classes/2915.json`
 
@@ -566,10 +576,12 @@ python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 | `--all-semesters` | 首頁列出的每個學年期都重抓，忽略 `--refresh-after` |
 | `--years FROM-TO` | 回補模式：抓這個學年度範圍內**尚未抓過**的學期，例 `--years 90-114` |
 | `--max-semesters N` | 這次最多抓幾個學期（回補分批用） |
+| `--out DIR` | 輸出目錄，預設 `data/` |
 | `--dept CODE` | 只抓指定系所（可重複）。輸出會是不完整的資料集 |
 | `--delay` | 每次請求後的延遲秒數，**下限 0.5** |
 | `--no-cache` | 略過 `.cache/`，強制重新抓取 |
 | `--pretty` | 輸出縮排過的 JSON（檔案會變大） |
+| `--log-level` | 記錄層級，預設 `INFO`。抓不到東西時開 `DEBUG` 看實際打了哪些 URL |
 
 ### 測試
 
@@ -608,6 +620,12 @@ crawler/
   parse_course.py   # 解析 format=-4(純函式,不連網)
   output.py         # 把 CrawlResult 寫成各維度的 JSON
   main.py           # CLI:選學期、抓取流程、去重
+
+tests/              # 全離線,對 tests/fixtures/ 的真實 HTML 樣本斷言
+scripts/            # 一次性的偵察腳本(recon*.py),不參與正式流程,
+                    # 留著是為了保存「當初怎麼確認的」這件事
+.github/workflows/  # crawl(每 4 小時)、backfill(手動回補)、test(每次 push)
+web/index.html      # 發布到 gh-pages 根目錄的說明頁,由 workflow 複製過去
 ```
 
 解析器一律是**純函式**：吃 HTML 字串 → 吐 dataclass，不發網路請求。
