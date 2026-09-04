@@ -10,8 +10,8 @@
 資料依**系所 / 教師 / 班級 / 學程 / 教室 / 時段**分別建索引，
 查一位老師的課不必先下載全校兩千多門課。
 
-涵蓋 **90-1 至 115-1 共 51 個學期、140,755 門課**（民國 90 年起，約 25 年）。
-課程數是 2026-09-04 的實測值，選課期間會小幅變動；即時數字請讀 `meta.json`
+涵蓋 **90-1 至 115-1 共 51 個學期、141,018 門課**（民國 90 年起，約 25 年）。
+課程數是 2026-09-05 的實測值，選課期間會小幅變動；即時數字請讀 `meta.json`
 的 `semesters[].course_count`。
 
 ---
@@ -58,7 +58,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `errors.json` | 各學期抓取失敗的單位（目前 51 個學期全部為空） | < 1 KB |
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
-| `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 40 KB / 天 |
+| `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 120 KB / 天 |
 | `syllabus.json` | 教學大綱的抓取進度（見下） | 隨課數變動 |
 | `{semester}/syllabus/{course_id}.json` | 單一課程的教學大綱與進度 | 約 3–8 KB / 門 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
@@ -541,6 +541,7 @@ https://tntrock.github.io/ntut-course-crawler/
       "time_slots": [{ "day": 5, "day_name": "五", "periods": ["2", "3", "4"] }],
       "classrooms": ["六教727(e)"],
       "classroom_codes": ["452"],
+      "enrolled": 22,
       "quota": 22,
       "withdrawn": 0,
       "language": null,
@@ -775,7 +776,9 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
 - **舊學期的系所代碼與現在不一定對得起來。** 系所會改名、合併、裁撤，
   代碼也會被回收。跨學期比較時請以各學期自己的 `departments.json` 為準，
   不要拿 115-1 的代碼表去套 95-1。
-- 教學大綱內容尚未實作，目前只提供 `syllabus_url` 連結。
+- **教學大綱是每天全跑一次抓下來的**，`updated_at` 是老師在學校系統上最後
+  修改的時間（已轉成 UTC）。看不懂的日期格式會原樣保留，不保證是 ISO 8601。
+  沒有 `syllabus_url` 的課（跨校選課那類）不會有 `{semester}/syllabus/` 檔案。
 
 ---
 

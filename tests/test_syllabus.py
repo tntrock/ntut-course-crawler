@@ -13,7 +13,7 @@ import pytest
 
 from crawler.main import crawl, crawl_syllabi, main, select_syllabus_targets
 from crawler.models import Course
-from crawler.output import read_syllabus_state
+from crawler.output import read_syllabus_state, write_syllabus_index
 from crawler.parse_syllabus import parse_syllabus
 # fake_fetcher_factory 讓 main() 也用假的 Fetcher —— 測試一律不連網
 from tests.test_main import FakeFetcher, fake_fetcher_factory  # noqa: F401
@@ -164,6 +164,28 @@ class TestCrawlSyllabi:
         assert entry["fetched"] == len(state)
         assert entry["course_count"] == len(result.courses)
         assert entry["with_url"] == len(state)
+
+    def test_other_semesters_keep_their_totals(self, tmp_path, result):
+        """換一個學期抓大綱,不能把上一個學期的「共幾門」洗掉。
+
+        `crawl_syllabi` 一次只處理一個學期,所以 totals 只帶得出當下這個。
+        沿用舊值的話,115-1 的進度會在 114-2 跑完之後變成「抓了 1909 門 /
+        共 ? 門」—— 分母憑空消失,workflow 的進度輸出會印成 `?`。
+        """
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+
+        state = read_syllabus_state(tmp_path)
+        state["114-2"] = {"999999": "2026-09-05T00:00:00Z"}
+        write_syllabus_index(
+            tmp_path, state, {"114-2": {"course_count": 2809, "with_url": 1800}}
+        )
+
+        by_semester = {e["semester"]: e for e in read(tmp_path / "syllabus.json")["semesters"]}
+        assert by_semester["115-1"]["course_count"] == len(result.courses)
+        assert by_semester["115-1"]["with_url"] == len(
+            [c for c in result.courses if c.syllabus_url]
+        )
+        assert by_semester["114-2"]["course_count"] == 2809
 
     def test_a_second_run_fetches_nothing(self, tmp_path, result):
         crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)

@@ -532,7 +532,22 @@ def write_syllabus_index(
     `semesters` 是給人看的進度(抓了幾門 / 共幾門 / 最舊那筆多久以前),
     `fetched` 是給下一次執行看的狀態。分開放是因為前者小、後者大,
     前端要顯示進度不必吞下幾千筆時間戳。
+
+    `totals`(共幾門 / 幾門有大綱)只會帶**這次抓過的學期** —— 呼叫端一次
+    只處理一個學期,不會知道別的學期有幾門課。所以其他學期的 totals 要從
+    舊檔沿用,否則「抓了 1909 門 / 共幾門」的分母會在下一個學期跑完之後
+    憑空消失,進度就只剩一個沒有基準的數字。
     """
+    previous_totals = {
+        entry["semester"]: {
+            key: entry[key] for key in ("course_count", "with_url") if key in entry
+        }
+        for entry in ((_read_json(Path(out_dir) / "syllabus.json") or {}).get(
+            "semesters"
+        ) or [])
+        if isinstance(entry, dict) and entry.get("semester")
+    }
+
     trimmed = {
         sem: dict(sorted(courses.items())[:SYLLABUS_STATE_LIMIT])
         for sem, courses in sorted(state.items(), reverse=True)
@@ -547,6 +562,7 @@ def write_syllabus_index(
             "oldest_fetch": stamps[0] if stamps else None,
             "newest_fetch": stamps[-1] if stamps else None,
         }
+        entry.update(previous_totals.get(sem) or {})
         entry.update(totals.get(sem) or {})
         semesters.append(entry)
 
