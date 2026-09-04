@@ -43,7 +43,9 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 330      # Actions 單 job 上限 6 小時,留緩衝
+    # Actions 單 job 上限 6 小時,留緩衝。最壞情況是三次抓取全失敗:
+    # 3 × 約 15 分鐘 + 2 × 20 分鐘等待 ≈ 85 分鐘,離上限還很遠。
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
 
@@ -93,6 +95,18 @@ jobs:
           fi
 
       # 參數一律走環境變數,不直接把 inputs 內插進 shell —— 那是 script injection。
+      #
+      # 失敗就等一段時間整批重來。crawler 內部的重試是「單一請求」層次的
+      # (8 次、約 7.5 分鐘),那治得了線路抖動,治不了實際遇過的中斷 ——
+      # 2026-09-04 08:33 UTC 那次 GitHub runner 連不到學校,持續了近一小時,
+      # 而同一時間從台灣連只要 17 毫秒。這種幾十分鐘等級的中斷只能等。
+      #
+      # 三次嘗試、每次間隔 20 分鐘,涵蓋約 55 分鐘的時窗。再撐下去意義不大:
+      # 中斷若超過一小時,四小時後的下一班排程才是對的復原手段,而不是讓
+      # runner 空轉。中斷期間封包在防火牆就被丟了,對學校沒有額外負擔。
+      #
+      # 重試很便宜:.cache/ 在同一個 job 內是共用的,前一次已經抓到的頁面
+      # 不會再打一次,所以「抓到一半失敗」的重試只會補剩下的部分。
       - name: Crawl
         env:
           YEAR: ${{ inputs.year }}
@@ -101,6 +115,8 @@ jobs:
           DELAY: ${{ inputs.delay || '1.0' }}
           REFRESH_AFTER: ${{ inputs.refresh_after || '24' }}
           ALL_SEMESTERS: ${{ inputs.all_semesters }}
+          MAX_ATTEMPTS: '3'
+          RETRY_WAIT_SECONDS: '1200'
         run: |
           args=(--out data/ --delay "$DELAY" --refresh-after "$REFRESH_AFTER")
           if [ -n "$YEAR" ]; then
@@ -112,7 +128,17 @@ jobs:
           if [ "$ALL_SEMESTERS" = "true" ]; then
             args+=(--all-semesters)
           fi
-          python -m crawler.main "${args[@]}"
+
+          attempt=1
+          until python -m crawler.main "${args[@]}"; do
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::抓取連續 $attempt 次失敗,放棄本次執行(下一班排程會再試)"
+              exit 1
+            fi
+            echo "::warning::第 $attempt 次抓取失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
+            sleep "$RETRY_WAIT_SECONDS"
+            attempt=$((attempt + 1))
+          done
 
       # 首頁。gh-pages 根目錄沒有 index.html 的話,GitHub Pages 會退而直接把
       # 1.5 MB 的 index.json 吐給訪客 —— 那不是給人看的東西。

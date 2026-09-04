@@ -49,9 +49,19 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 CHANGE_EVENT_LIMIT = 500
 
 #: 單次抓取超過這麼多筆異動就折成一筆摘要,不逐筆列出。
-#: 學校端的正常異動是個位數;一口氣幾百筆通常是版面改了或抓歪了,
-#: 照實寫進去只會把先前真正的異動整個推出保留範圍。
+#: 一口氣幾百筆有兩種可能 —— 學校真的開了一批課(115-1 實際遇過:一次多了
+#: 7 個跨校選課班級、265 門課),或是版面改了 / 抓歪了。兩種都不該逐筆灌進
+#: 事件流,那會把先前真正的異動整個推出保留範圍。
 CHANGE_BULK_THRESHOLD = 200
+
+#: 摘要裡最多列幾個班級的分組統計。系所頂多 60 個所以全列,
+#: 班級可能有幾百個,只留量最大的幾個 —— 異常都集中在前面。
+CHANGE_GROUP_LIMIT = 20
+
+#: 摘要裡附幾筆完整事件當樣本。
+#: 只有 count 的話,人還是得自己去 diff 才知道發生什麼事,
+#: 而那正是這個檔要省掉的工。
+CHANGE_SAMPLE_LIMIT = 10
 
 #: 拿來判斷「這門課有沒有變」的欄位。取自索引項目 —— 索引本來就是
 #: 「篩選 / 搜尋會用到」的那些欄位,剛好也就是異動了會影響到人的那些。
@@ -643,25 +653,38 @@ def _teacher_event(
 def _collapse_if_bulk(
     events: list[dict[str, Any]], semester: str, stamp: str
 ) -> list[dict[str, Any]]:
-    """一次幾百筆異動的話,折成一筆摘要。
+    """一次幾百筆異動的話,折成一筆**帶分組統計**的摘要。
 
-    學校端的正常異動是個位數。一口氣幾百筆通常是版面改了或抓歪了 ——
-    照實逐筆寫進去只會把先前真正的異動整個推出保留範圍,反而讓這個檔
-    在最需要它的時候失去價值。
+    逐筆灌進去會把先前真正的異動整個推出保留範圍,所以要折;但只留一個
+    總數又等於什麼都沒說 —— 人還是得自己去 diff 才知道發生什麼事,而那
+    正是這個檔要省掉的工。
+
+    所以摘要要能直接回答「這批是什麼」:依系所與班級分組的數量、加上幾筆
+    完整樣本。115-1 實際遇過的那次(265 門新增)長這樣 ——
+
+        by_department: {"01": 185, "14": 80}
+        by_class:      {"589": 80, "2519": 42, "2520": 38, ...}
+
+    兩個單位、7 個班級,一眼就看得出是「學校開了一批跨校選課」而不是
+    「解析器壞了」。真的抓歪時分組會散落在幾十個系所,一樣一眼分得出來。
     """
     if len(events) <= CHANGE_BULK_THRESHOLD:
         return events
 
-    counts: dict[str, int] = {}
-    for event in events:
-        counts[event["type"]] = counts.get(event["type"], 0) + 1
+    counts = _tally(events, lambda e: [e["type"]])
+    by_department = _tally(events, lambda e: e.get("department_ids") or [])
+    by_class = _tally(events, lambda e: e.get("class_ids") or [])
+
     log.warning(
-        "%s 一次偵測到 %d 筆異動(%s),超過 %d 筆上限,只記摘要。"
-        "這個量通常代表版面改了或抓歪了,建議人工確認。",
+        "%s 一次偵測到 %d 筆異動(%s),超過 %d 筆上限,折成摘要。"
+        "系所分布 %s;班級分布 %s。集中在少數幾組通常是學校開了一批課,"
+        "散落在幾十個系所則多半是版面改了或抓歪了 —— 兩種都建議人工確認。",
         semester,
         len(events),
-        ", ".join(f"{k} {v}" for k, v in sorted(counts.items())),
+        ", ".join(f"{k} {v}" for k, v in counts.items()),
         CHANGE_BULK_THRESHOLD,
+        by_department or "(無)",
+        _head(by_class, CHANGE_GROUP_LIMIT) or "(無)",
     )
     return [
         {
@@ -669,10 +692,31 @@ def _collapse_if_bulk(
             "semester": semester,
             "type": "bulk_change",
             "event_count": len(events),
-            "counts": dict(sorted(counts.items())),
-            "note": "異動量異常,未逐筆列出,請查 Actions 記錄",
+            "counts": counts,
+            # 系所頂多 60 個所以全列;班級可能有幾百個,只留量最大的幾個
+            "by_department": by_department,
+            "by_class": _head(by_class, CHANGE_GROUP_LIMIT),
+            "samples": events[:CHANGE_SAMPLE_LIMIT],
+            "note": "異動量超過上限,未逐筆列出;分組統計與樣本見上",
         }
     ]
+
+
+def _tally(events: list[dict[str, Any]], keys) -> dict[str, int]:
+    """依 `keys(event)` 取出的每個鍵計數,由多到少排序。
+
+    一門課可能同時掛在多個系所 / 班級(合開、跨校),所以是一對多 ——
+    分組數量的總和會大於事件數,這是對的。
+    """
+    counts: dict[str, int] = {}
+    for event in events:
+        for key in keys(event):
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _head(counts: dict[str, int], limit: int) -> dict[str, int]:
+    return dict(list(counts.items())[:limit])
 
 
 def _previous_index_entries(

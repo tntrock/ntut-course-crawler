@@ -484,7 +484,7 @@ class TestChangeLog:
     # -- 保護機制 -----------------------------------------------------------
 
     def test_a_huge_batch_is_collapsed_into_a_summary(self, tmp_path, full, monkeypatch):
-        """一次幾百筆通常是抓歪了。照實寫會把先前真正的異動整個推出保留範圍。"""
+        """一次幾百筆會把先前真正的異動整個推出保留範圍,所以要折。"""
         monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
         write_outputs(full(), tmp_path)
 
@@ -497,6 +497,74 @@ class TestChangeLog:
         assert events[0]["counts"]["course_removed"] == 5
         assert events[0]["event_count"] > 2
         assert events[1]["type"] == "baseline", "先前的事件要留著"
+
+    def test_the_summary_says_which_departments_and_classes(
+        self, tmp_path, full, monkeypatch
+    ):
+        """只有一個總數等於什麼都沒說 —— 人還是得自己 diff 才知道發生什麼事。
+
+        115-1 實際遇過:一次多了 265 門課,摘要只寫「265」,結果還是得去翻
+        gh-pages 的 commit 才知道那是學校開了 7 個跨校選課班級。
+        """
+        monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        second.courses = second.courses[:1]
+        write_outputs(second, tmp_path)
+
+        summary = self.events(tmp_path)[0]
+        # 資工系的 fixture:5 門課全掛在 59,分佈在 5 個班級。
+        # 教師事件也帶 department_ids,所以系所計數涵蓋兩種事件。
+        assert list(summary["by_department"]) == ["59"]
+        assert summary["by_department"]["59"] == summary["event_count"]
+        assert set(summary["by_class"]) == {"2915", "3032", "3138", "3718", "3743"}
+        assert all(isinstance(v, int) for v in summary["by_class"].values())
+
+    def test_the_summary_groups_are_ordered_by_size(self, tmp_path, full, monkeypatch):
+        """量最大的排前面 —— 異常集中在哪裡要第一眼看到。"""
+        monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
+
+        first = full()
+        # 讓 3 門課掛到另一個系所,製造出不平均的分佈
+        for course in first.courses[:3]:
+            course.department_ids = ["14"]
+        write_outputs(first, tmp_path)
+
+        second = full()
+        second.courses = []
+        write_outputs(second, tmp_path)
+
+        by_dept = self.events(tmp_path)[0]["by_department"]
+        assert list(by_dept) == sorted(by_dept, key=lambda k: -by_dept[k])
+        assert by_dept["59"] > by_dept["14"], "6 門課裡 59 佔 3 門以上"
+
+    def test_the_summary_carries_sample_events(self, tmp_path, full, monkeypatch):
+        """樣本要是完整事件,看得到課名,不是只有課號。"""
+        monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
+        monkeypatch.setattr("crawler.output.CHANGE_SAMPLE_LIMIT", 3)
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        second.courses = second.courses[:1]
+        write_outputs(second, tmp_path)
+
+        samples = self.events(tmp_path)[0]["samples"]
+        assert len(samples) == 3
+        assert all(s["type"] == "course_removed" for s in samples)
+        assert all(s["name"] for s in samples), "樣本要帶課名"
+
+    def test_the_class_breakdown_is_capped(self, tmp_path, full, monkeypatch):
+        """班級可能有幾百個,只留量最大的幾個。"""
+        monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
+        monkeypatch.setattr("crawler.output.CHANGE_GROUP_LIMIT", 2)
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        second.courses = []
+        write_outputs(second, tmp_path)
+
+        assert len(self.events(tmp_path)[0]["by_class"]) == 2
 
     def test_old_events_are_dropped_at_the_limit(self, tmp_path, full, monkeypatch):
         monkeypatch.setattr("crawler.output.CHANGE_EVENT_LIMIT", 3)
