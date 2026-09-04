@@ -21,11 +21,11 @@ import json
 import logging
 import re
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from .config import BASE_URL, INDEX_SEMESTERS, SCHEMA_VERSION
+from .config import BASE_URL, INDEX_SEMESTERS, SCHEMA_VERSION, TAIPEI
 from .models import Course, requirement_table
 from .periods import period_table
 
@@ -81,14 +81,13 @@ _TRACKED_FIELDS = (
     "class_ids",
 )
 
+#: 根目錄 syllabus.json 裡每個學期最多記幾門課的抓取狀態。
+#: 一個學期兩三千門,留 5000 是為了不必為了「這學期特別多」而改碼。
+SYLLABUS_STATE_LIMIT = 5000
+
 #: 根目錄 enrollment.json 保留幾筆快照索引。一個學期約 120 天,
 #: 400 筆容得下三個學期的重疊期。
 ENROLLMENT_SNAPSHOT_LIMIT = 400
-
-#: 台灣時區。學校的「今天」是這個時區的今天,快照按日分檔要用它切,
-#: 不然 UTC 午夜會落在台灣早上八點,把一天從中間切成兩半。
-#: 台灣沒有日光節約時間,固定 +8 就是正確的,不必依賴 tzdata。
-TAIPEI = timezone(timedelta(hours=8))
 
 #: 每次完整抓取都會整個重建的子目錄。不先清掉的話,
 #: 上一輪留下的班級 / 教師檔會變成永遠不會更新的幽靈資料。
@@ -474,6 +473,90 @@ def _day_name(day: int) -> str:
     from .periods import DAY_NAMES
 
     return DAY_NAMES[day] if 0 <= day < len(DAY_NAMES) else str(day)
+
+
+# --------------------------------------------------------------------------
+# 教學大綱
+# --------------------------------------------------------------------------
+def write_syllabus(
+    out_dir: Path,
+    semester: str,
+    course_id: str,
+    payload: dict[str, Any],
+    *,
+    pretty: bool = False,
+) -> str:
+    """寫一門課的教學大綱,回傳它的相對路徑。
+
+    一課一檔而不是整包一個檔:一個學期兩千多門課,每門的大綱動輒好幾 KB,
+    合起來是十幾 MB —— 想看一門課的大綱不該先下載整個學期。
+    """
+    safe = _safe_id(course_id, "課程")
+    if safe is None:
+        raise ValueError(f"課號 {course_id!r} 不能當檔名")
+    path = f"{semester}/syllabus/{safe}.json"
+    _write_json(Path(out_dir) / path, payload, pretty)
+    return path
+
+
+def read_syllabus_state(out_dir: Path) -> dict[str, dict[str, str]]:
+    """讀根目錄 `syllabus.json`,回傳 學期 → {課號: 抓取時間}。
+
+    用來決定「這門課的大綱抓過了沒、多久以前抓的」。放根目錄才能跟
+    meta / index / errors / changes / enrollment 一起被 workflow 還原 ——
+    學期子目錄不在 sparse checkout 的範圍內,放那裡等於每次都失憶。
+    """
+    data = _read_json(Path(out_dir) / "syllabus.json") or {}
+    state = data.get("fetched")
+    if not isinstance(state, dict):
+        return {}
+    return {
+        sem: {cid: at for cid, at in courses.items() if isinstance(at, str)}
+        for sem, courses in state.items()
+        if isinstance(courses, dict)
+    }
+
+
+def write_syllabus_index(
+    out_dir: Path,
+    state: dict[str, dict[str, str]],
+    totals: dict[str, dict[str, Any]],
+    *,
+    pretty: bool = False,
+) -> None:
+    """根目錄 `syllabus.json`:每個學期抓到哪了,以及逐課的抓取時間。
+
+    `semesters` 是給人看的進度(抓了幾門 / 共幾門 / 最舊那筆多久以前),
+    `fetched` 是給下一次執行看的狀態。分開放是因為前者小、後者大,
+    前端要顯示進度不必吞下幾千筆時間戳。
+    """
+    trimmed = {
+        sem: dict(sorted(courses.items())[:SYLLABUS_STATE_LIMIT])
+        for sem, courses in sorted(state.items(), reverse=True)
+        if courses
+    }
+    semesters = []
+    for sem, courses in trimmed.items():
+        stamps = sorted(courses.values())
+        entry = {
+            "semester": sem,
+            "fetched": len(courses),
+            "oldest_fetch": stamps[0] if stamps else None,
+            "newest_fetch": stamps[-1] if stamps else None,
+        }
+        entry.update(totals.get(sem) or {})
+        semesters.append(entry)
+
+    _write_json(
+        Path(out_dir) / "syllabus.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "semesters": semesters,
+            "fetched": trimmed,
+        },
+        pretty,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1022,6 +1105,11 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "errors.json", "description": "各學期抓取失敗的單位"},
         {"path": "changes.json", "description": "最近的課程與教師異動事件"},
         {"path": "enrollment.json", "description": "修課 / 撤選人數快照的索引"},
+        {"path": "syllabus.json", "description": "教學大綱的抓取進度"},
+        {
+            "path": "{semester}/syllabus/{course_id}.json",
+            "description": "單一課程的教學大綱與進度",
+        },
         {
             "path": "{semester}/enrollment/{date}.json",
             "description": "某一天的逐課修課 / 撤選人數",

@@ -22,12 +22,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import SCHEMA_VERSION
 from .http import Fetcher, SiteUnavailable
 from .models import ClassGroup, Course, Department, Semester
-from .output import read_semester_times, write_outputs, write_semester_failure
+from .output import (
+    read_semester_times,
+    read_syllabus_state,
+    write_outputs,
+    write_semester_failure,
+    write_syllabus,
+    write_syllabus_index,
+)
 from .parse_course import parse_courses
 from .parse_dept import parse_class_groups, parse_colleges
 from .parse_semester import parse_semesters
+from .parse_syllabus import parse_syllabus
 
 log = logging.getLogger("crawler")
 
@@ -46,6 +55,19 @@ DEFAULT_REFRESH_AFTER = 24.0
 #: 但連續失敗幾乎一定是對方整體不可用 —— 這時候繼續試沒有意義,也不禮貌。
 #: 中止不影響已抓好的學期(它們早就落地了),失敗的下次執行會自動重試。
 CONSECUTIVE_FAILURE_LIMIT = 3
+
+#: 教學大綱預設多久重抓一次(小時)。
+#:
+#: 大綱是老師開學前填好就很少再動的東西(樣本的「最後更新時間」是開學前一個月),
+#: 但整學期完全不重抓也不對 —— 有人會補、會改。30 天是個折衷。
+DEFAULT_SYLLABUS_REFRESH_AFTER = 720.0
+
+#: 一次執行最多抓幾頁教學大綱。
+#:
+#: 大綱是**一門課一頁**,115-1 有 2,717 門 —— 以 1 秒的延遲下限計算,
+#: 全抓一輪要 45 分鐘。分批抓,幾天內輪完一圈,對學校溫和得多,
+#: 也不會讓單一 job 拖太久。0 代表不限。
+DEFAULT_MAX_SYLLABUS = 800
 
 
 # --------------------------------------------------------------------------
@@ -305,6 +327,139 @@ def _crawl_department(
 
 
 # --------------------------------------------------------------------------
+# 教學大綱
+# --------------------------------------------------------------------------
+def select_syllabus_targets(
+    courses: list[Course],
+    fetched: dict[str, str],
+    *,
+    limit: int | None,
+    refresh_after: float,
+    now: datetime | None = None,
+) -> list[Course]:
+    """挑這次要抓大綱的課:沒抓過的優先,其次是最久沒重抓的。
+
+    沒有 `syllabus_url` 的課直接跳過 —— 跨校選課那類課程在北科的系統裡
+    沒有大綱連結(115-1 一次多的那 265 門就是),硬湊一個 URL 只會白打一頁。
+
+    分批的意義在於:全校一輪要 45 分鐘,每天抓一批、幾天輪完一圈,
+    對學校溫和得多。排序保證每一門最終都會輪到,不會有課永遠排不到。
+    """
+    now = now or datetime.now(timezone.utc)
+    stale: list[tuple[float, Course]] = []
+
+    for course in courses:
+        if not course.syllabus_url:
+            continue
+        raw = fetched.get(course.id)
+        if raw is None:
+            stale.append((float("inf"), course))  # 沒抓過的排最前面
+            continue
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            stale.append((float("inf"), course))
+            continue
+        age = (now - stamp).total_seconds() / 3600
+        if age >= refresh_after:
+            stale.append((age, course))
+
+    # 越久沒抓的越前面;同齡時用課號排序,讓結果可預測
+    stale.sort(key=lambda pair: (-pair[0], pair[1].id))
+    picked = [course for _, course in stale]
+    if limit:
+        picked = picked[:limit]
+    return picked
+
+
+def crawl_syllabi(
+    fetcher: Fetcher,
+    result: CrawlResult,
+    out_dir: Path,
+    *,
+    limit: int | None,
+    refresh_after: float,
+    pretty: bool = False,
+) -> int:
+    """抓一個學期的教學大綱,回傳這次成功抓了幾門。
+
+    **每抓一門就落地。** 一批 800 頁要十幾分鐘,中途失敗時已經抓好的
+    不該跟著賠掉 —— 下次執行會從沒抓過的那些接著抓。
+    """
+    state = read_syllabus_state(out_dir)
+    fetched = dict(state.get(result.semester) or {})
+    targets = select_syllabus_targets(
+        result.courses, fetched, limit=limit, refresh_after=refresh_after
+    )
+    have = sum(1 for c in result.courses if c.syllabus_url)
+    log.info(
+        "%s 教學大綱:%d 門有連結,已抓過 %d 門,本次要抓 %d 門",
+        result.semester,
+        have,
+        len(fetched),
+        len(targets),
+    )
+    if not targets:
+        return 0
+
+    ok = 0
+    for index, course in enumerate(targets, start=1):
+        if index % 100 == 0:
+            log.info("教學大綱 [%d/%d]", index, len(targets))
+        try:
+            html = fetcher.fetch(course.syllabus_url)
+        except Exception as exc:
+            log.error("課程 %s (%s) 的大綱抓取失敗:%s", course.name_zh, course.id, exc)
+            result.errors.append(
+                {
+                    "stage": "syllabus",
+                    "course_id": course.id,
+                    "course_name": course.name_zh,
+                    "url": course.syllabus_url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            if isinstance(exc, SiteUnavailable):
+                log.error("站台已判定不可用,停止抓大綱;已抓好的保留")
+                break
+            continue
+
+        parsed = parse_syllabus(html)
+        if not parsed:
+            # 老師沒填大綱。記下時間戳,不然每次執行都會再來問一次同一頁。
+            log.debug("課程 %s 沒有大綱內容", course.id)
+
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "year": result.year,
+            "sem": result.sem,
+            "course_id": course.id,
+            "course_name": course.name_zh,
+            "teachers": list(course.teachers),
+            "department_ids": list(course.department_ids),
+            "url": course.syllabus_url,
+            "fetched_at": _utc_now(),
+            "has_content": bool(parsed),
+            **parsed,
+        }
+        write_syllabus(out_dir, result.semester, course.id, payload, pretty=pretty)
+        fetched[course.id] = payload["fetched_at"]
+        ok += 1
+
+    state[result.semester] = fetched
+    totals = {result.semester: {"course_count": len(result.courses), "with_url": have}}
+    write_syllabus_index(out_dir, state, totals, pretty=pretty)
+    log.info("%s 教學大綱本次抓了 %d 門", result.semester, ok)
+    return ok
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -352,6 +507,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="每次請求後的延遲秒數(下限 0.5,預設 1.0)",
+    )
+    parser.add_argument(
+        "--with-syllabus",
+        action="store_true",
+        help="順便抓教學大綱(一門課一頁,很慢,預設關閉)",
+    )
+    parser.add_argument(
+        "--max-syllabus",
+        type=int,
+        default=DEFAULT_MAX_SYLLABUS,
+        metavar="N",
+        help=f"這次最多抓幾頁教學大綱(預設 {DEFAULT_MAX_SYLLABUS},0 = 不限)",
+    )
+    parser.add_argument(
+        "--syllabus-refresh-after",
+        type=float,
+        default=DEFAULT_SYLLABUS_REFRESH_AFTER,
+        metavar="HOURS",
+        help=f"教學大綱隔多久重抓一次(預設 {DEFAULT_SYLLABUS_REFRESH_AFTER:.0f} 小時)",
     )
     parser.add_argument(
         "--no-cache", action="store_true", help="略過 .cache/,強制重新抓取"
@@ -434,6 +608,21 @@ def main(argv: list[str] | None = None) -> int:
         # 每抓完一個學期就落地,後面的學期失敗也不會賠掉前面的成果
         write_outputs(result, args.out, pretty=args.pretty)
         results.append(result)
+
+        if args.with_syllabus:
+            if result.partial:
+                log.warning("--dept 的局部抓取不抓教學大綱")
+            else:
+                crawl_syllabi(
+                    fetcher,
+                    result,
+                    args.out,
+                    limit=args.max_syllabus or None,
+                    refresh_after=args.syllabus_refresh_after,
+                    pretty=args.pretty,
+                )
+                # 大綱抓完可能新增了錯誤,重寫一次 errors.json
+                write_outputs(result, args.out, pretty=args.pretty)
 
     _print_summary(results, fetcher, args.out)
 

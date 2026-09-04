@@ -42,6 +42,8 @@ class FakeFetcher:
         # 抓到第幾個請求時模擬斷路器跳開(None = 從頭到尾都正常)
         self.unavailable_after = unavailable_after
         self.unavailable = False
+        # 這些教學大綱網址回「沒有內容」的頁面(老師沒填)
+        self.no_syllabus: set[str] = set()
         self.calls: list[tuple[int, str | None]] = []
         self.request_count = 0
         self.cache_hit_count = 0
@@ -69,6 +71,11 @@ class FakeFetcher:
         key = (params.get("year"), params.get("sem"))
         if key in self.fail_semesters:
             raise TimeoutError(f"模擬 {key[0]}-{key[1]} 連線逾時")
+
+        if "ShowSyllabus.jsp" in url:
+            if url in self.no_syllabus:
+                return "<html><body>查無資料</body></html>"
+            return load_fixture("syllabus_page_real.html")
 
         if url == "course.jsp":
             # 首頁列出 115-1 與 114-2 兩個學年期

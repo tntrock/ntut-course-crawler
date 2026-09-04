@@ -44,6 +44,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | 最近有哪些課 / 老師被加開、停開、調課、換人 | `changes.json` | |
 | **退選率**、修課人數 | 課程物件的 `enrolled` / `withdrawn`（見下） | |
 | 退選率**隨時間的走勢** | `enrollment.json` | |
+| **某門課的教學大綱**（進度、評量、教材、SDGs） | `{semester}/syllabus/{課號}.json` | `115-1/syllabus/364893.json` |
 
 不知道代碼？先拉 `{semester}/departments.json`、`teachers.json`、`classes.json`，
 每一筆都附了 `path` 欄位，直接接在 base URL 後面就是明細檔的網址。
@@ -58,6 +59,8 @@ https://tntrock.github.io/ntut-course-crawler/
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
 | `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 40 KB / 天 |
+| `syllabus.json` | 教學大綱的抓取進度（見下） | 隨課數變動 |
+| `{semester}/syllabus/{course_id}.json` | 單一課程的教學大綱與進度 | 約 3–8 KB / 門 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
 | `{semester}/courses/{department_id}.json` | 系所課表（完整課程物件） | 60 檔，共 1.5 MB |
@@ -222,6 +225,63 @@ https://tntrock.github.io/ntut-course-crawler/
 > **人數的變動刻意不進 `changes.json`。** 加退選期間每 4 小時就有上千門課的
 > 人數在動，塞進事件流會每次都觸發 `bulk_change`，把真正的結構性異動
 > （加開、停開、調課、換老師）整個淹掉 —— 兩種資料的變動頻率差一個數量級。
+
+### 教學大綱
+
+課程物件的 `syllabus_url` 是學校原始頁面的網址；
+`{semester}/syllabus/{課號}.json` 是**解析過的內容**：
+
+```json
+{
+  "course_id": "364893", "course_name": "數位影像處理",
+  "teachers": ["白敦文"], "department_ids": ["59"],
+  "url": "https://aps.ntut.edu.tw/course/tw/ShowSyllabus.jsp?snum=364893&code=12095",
+  "fetched_at": "2026-09-05T19:12:44Z",
+  "updated_at": "2026-08-11T01:00:23Z",
+  "has_content": true,
+
+  "teacher_name": "白敦文", "teacher_email": "twp@ntut.edu.tw",
+  "outline": "This course will be lectured in Chinese/English…",
+  "schedule": "1. Introduce to Image Processing\nAI applications\n…",
+  "flexible_learning": {
+    "category": ["學生分組實作及討論", "AI 輔助學習與工具應用", "遠距教學"],
+    "content": "…", "hours": 3, "outcome": "…", "assessment_ratio": "…"
+  },
+  "assessment": "Quiz:15%, Homework:15%, Midterm 35%, Final 35%.",
+  "materials": "…", "contact": ["研究室分機(Extension): 4222", "…"],
+  "extended_resources": ["混成學習 (Blended Learning)", "…"],
+  "sdgs": ["SDG4：優質教育（Quality Education）", "…"],
+  "ai_usage": ["使用生成式AI作為教學過程的輔助工具", "…"],
+  "notes": "…"
+}
+```
+
+- `updated_at` 是**老師最後修改大綱的時間**（學校顯示台灣時間，這裡轉成 UTC，
+  跟全站其他時間戳一致）；`fetched_at` 是我們抓下來的時間。
+- `has_content` 為 `false` 代表老師還沒填。檔案仍然會產生 —— 沒有它的話，
+  每次執行都會再去問一次同一頁。
+- 條列式的欄位（`sdgs`、`ai_usage`、`contact`、`extended_resources`）輸出成陣列，
+  項目符號已去掉。長文欄位（`outline`、`schedule`、`materials`）保留原樣的換行，
+  不自作聰明切開。
+- **認不得的欄位不會被丟掉**，會原樣收進 `extra`。學校加新欄位時
+  （SDGs 和「是否導入 AI」顯然就是近年才加的）才不會靜靜漏抓半年。
+
+#### 為什麼大綱是每天抓、而且分批
+
+大綱是**一門課一頁**。115-1 有 2,717 門，以 1 秒的延遲下限計算，
+全抓一輪要 **45 分鐘** —— 塞不進每 4 小時一次的例行抓取。
+
+所以獨立成 `syllabus` workflow，**每天跑一次**（UTC 19:00 = 台灣清晨 03:00），
+一次只抓一批（預設 800 頁，約 14 分鐘），**幾天輪完一圈**：
+
+- 沒抓過的優先，其次是最久沒重抓的 → 每一門最終都輪得到，不會有課永遠排不到
+- 同一門課預設 **30 天**才重抓（`--syllabus-refresh-after`）。
+  大綱是老師開學前填好就很少再動的東西，但整學期完全不重抓也不對
+- `syllabus.json` 記著每門課上次抓的時間，所以分批可以跨執行接續下去
+- 沒有 `syllabus_url` 的課直接跳過（跨校選課那類在北科系統裡沒有大綱連結）
+- 每抓一門就落地，中途失敗不會賠掉已經抓好的
+
+例行的 `crawl` workflow **完全不碰大綱**，維持 355 個請求、8 分鐘跑完。
 
 ### 為什麼檔名是代碼而不是中文？
 
@@ -654,6 +714,10 @@ GitHub Actions 的排程在尖峰時段常延遲十幾分鐘，屬正常現象�
 - **只涵蓋課程查詢系統的「上課時間表」**（`Subj.jsp?format=-2` 那棵樹）。
   該系統每個學期只提供這一個上課時間表入口，因此這棵樹爬完即無遺漏。
   暑期課程（`Summer.jsp`）、學程查詢、教室使用情形不在本專案範圍。
+- **教學大綱有抓**（見上），但那是每天分批更新的，最舊的一批可能是 30 天前抓的。
+  想知道確切時間看該檔的 `fetched_at`。
+- 學程查詢系統不在範圍內，所以查得到「無人機微學程有哪些課」，
+  查不到「修完幾門才算完成該微學程」。
 - **沒有進修部的獨立入口。** 實地確認過總覽頁的 60 個單位裡沒有進修部，
   抽查機械系、資工系的班級列表也沒有夜間班。若學校另有進修部課表，
   不在 `aps.ntut.edu.tw/course/tw/` 底下。
@@ -737,6 +801,9 @@ python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 | `--delay` | 每次請求後的延遲秒數，**下限 0.5** |
 | `--no-cache` | 略過 `.cache/`，強制重新抓取 |
 | `--pretty` | 輸出縮排過的 JSON（檔案會變大） |
+| `--with-syllabus` | 順便抓教學大綱（一門課一頁，很慢，預設關閉） |
+| `--max-syllabus N` | 這次最多抓幾頁大綱，預設 `800`，`0` = 不限 |
+| `--syllabus-refresh-after H` | 同一門課的大綱隔多久重抓，預設 `720` 小時（30 天） |
 | `--log-level` | 記錄層級，預設 `INFO`。抓不到東西時開 `DEBUG` 看實際打了哪些 URL |
 
 ### 測試
@@ -825,7 +892,8 @@ crawler/
 tests/              # 全離線,對 tests/fixtures/ 的真實 HTML 樣本斷言
 scripts/            # 一次性的偵察腳本(recon*.py),不參與正式流程,
                     # 留著是為了保存「當初怎麼確認的」這件事
-.github/workflows/  # crawl(每 4 小時)、backfill(手動回補)、test(每次 push)
+.github/workflows/  # crawl(每 4 小時)、syllabus(每天)、
+                    # backfill(手動回補)、test(每次 push)
 web/index.html      # 發布到 gh-pages 根目錄的說明頁,由 workflow 複製過去
 ```
 

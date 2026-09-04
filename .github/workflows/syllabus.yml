@@ -1,0 +1,142 @@
+name: syllabus
+
+# 教學大綱是**一門課一頁**。115-1 有 2,717 門,以 1 秒的延遲下限計算,
+# 全抓一輪要 45 分鐘 —— 那不可能塞進每 4 小時一次的例行抓取裡。
+#
+# 所以獨立一支、每天跑一次、一次只抓一批(預設 800 頁,約 14 分鐘),
+# 幾天輪完一圈。沒抓過的優先、其次是最久沒重抓的,所以每一門最終都輪得到。
+#
+# 這支同時也會做一次完整的課程抓取(355 個請求)—— 沒有課程資料就不知道
+# 每門課的大綱網址,而重跑一次課程抓取比為此多維護一條資料路徑便宜得多。
+
+on:
+  schedule:
+    # 每天 UTC 19:00 = 台灣清晨 03:00。挑離峰,也避開 4 小時排程的整點。
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      max_syllabus:
+        description: '這次最多抓幾頁大綱(0 = 不限,全校一輪約 45 分鐘)'
+        default: '800'
+      syllabus_refresh_after:
+        description: '同一門課的大綱隔多久才重抓(小時)'
+        default: '720'
+      year:
+        description: '學年度(留空 = 自動偵測)'
+        default: ''
+      sem:
+        description: '學期 1 或 2(填了 year 才需要)'
+        default: ''
+      delay:
+        description: '每次請求後的延遲秒數(下限 0.5)'
+        default: '1.0'
+
+permissions:
+  contents: write
+
+# 跟 crawl / backfill 共用同一個群組:同時抓等於對學校併發請求。
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
+jobs:
+  syllabus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: pytest -q
+
+      # 比 crawl.yml 多撈一個 syllabus.json —— 那是「哪些課的大綱抓過了、
+      # 什麼時候抓的」的狀態。少了它每次都會從頭抓,分批就沒有意義。
+      - name: Restore shared index files
+        run: |
+          mkdir -p data
+          if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json; do
+              if [ -f ".gh-pages/$f" ]; then
+                cp ".gh-pages/$f" "data/$f"
+                echo "已還原 $f($(stat -c%s "data/$f") bytes)"
+              else
+                echo "gh-pages 上還沒有 $f"
+              fi
+            done
+          else
+            echo "gh-pages 還不存在(第一次跑),從零開始"
+          fi
+
+      # 失敗就等 20 分鐘整批重來,理由同 crawl.yml。
+      # 重試很便宜:.cache/ 在同一個 job 內共用,已經抓好的頁面不會再打一次,
+      # 對大綱這種上百頁的批次特別有感。
+      - name: Crawl with syllabus
+        env:
+          YEAR: ${{ inputs.year }}
+          SEM: ${{ inputs.sem }}
+          DELAY: ${{ inputs.delay || '1.0' }}
+          MAX_SYLLABUS: ${{ inputs.max_syllabus || '800' }}
+          SYLLABUS_REFRESH_AFTER: ${{ inputs.syllabus_refresh_after || '720' }}
+          MAX_ATTEMPTS: '3'
+          RETRY_WAIT_SECONDS: '1200'
+        run: |
+          args=(--out data/ --delay "$DELAY" --with-syllabus
+                --max-syllabus "$MAX_SYLLABUS"
+                --syllabus-refresh-after "$SYLLABUS_REFRESH_AFTER")
+          if [ -n "$YEAR" ]; then
+            args+=(--year "$YEAR" --sem "$SEM")
+          fi
+
+          attempt=1
+          until python -m crawler.main "${args[@]}"; do
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::連續 $attempt 次失敗,放棄本次執行(明天的排程會接續)"
+              exit 1
+            fi
+            echo "::warning::第 $attempt 次失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
+            sleep "$RETRY_WAIT_SECONDS"
+            attempt=$((attempt + 1))
+          done
+
+      - name: Show progress
+        if: always()
+        run: |
+          if [ -f data/syllabus.json ]; then
+            python - <<'PY'
+          import json
+          data = json.load(open("data/syllabus.json", encoding="utf-8"))
+          for s in data.get("semesters", []):
+              total = s.get("with_url") or 0
+              done = s.get("fetched") or 0
+              pct = f"{done / total * 100:.1f}%" if total else "?"
+              print(f"{s['semester']}:已抓 {done}/{total}({pct}),"
+                    f"最舊一筆 {s.get('oldest_fetch')}")
+          PY
+          else
+            echo "尚無教學大綱資料"
+          fi
+
+      - name: Add landing page
+        run: cp web/index.html data/index.html
+
+      - name: Upload data as artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: data-${{ github.run_id }}
+          path: data/
+          retention-days: 7
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          keep_files: true

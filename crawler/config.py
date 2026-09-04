@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta, timezone
 
 from . import __version__
+
+#: 台灣時區。學校頁面顯示的時間、以及「今天」的界線都用它。
+#: 台灣沒有日光節約時間,固定 +8 就是正確的,不必依賴 tzdata。
+TAIPEI = timezone(timedelta(hours=8))
 
 #: 課程系統的 base URL,結尾必須有斜線(urljoin 用)
 BASE_URL = "https://aps.ntut.edu.tw/course/tw/"
