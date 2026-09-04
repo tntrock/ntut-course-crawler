@@ -98,6 +98,11 @@ def to_utc_z(iso: str) -> str:
 
 def rebuild(repo: Path, ref: str = "origin/gh-pages") -> dict:
     events: list[dict] = []
+    # 最後一次「比對過」的時間 —— 是最新的**發布**時間,不是最新的事件時間。
+    # 兩者常常差很遠(最近幾次跑都沒有異動時,最新事件可能是好幾天前的),
+    # 而 checked_at 的用途正是分辨「學校沒動」與「爬蟲沒在跑」。取錯會讓
+    # 前端誤判成後者。
+    checked_at = ""
 
     # 只處理發布過兩次以上的學期 —— 見下方的 `len(revs) < 2`。
     for semester in semesters(repo, ref):
@@ -109,6 +114,7 @@ def rebuild(repo: Path, ref: str = "origin/gh-pages") -> dict:
             # 時間戳的 baseline 洗版,把真正的異動擠掉。
             continue
 
+        checked_at = max(checked_at, to_utc_z(revs[-1][1]))
         first_sha, first_when = revs[0]
         previous = courses_at(repo, first_sha, path)
         events.append(
@@ -139,12 +145,13 @@ def rebuild(repo: Path, ref: str = "origin/gh-pages") -> dict:
 
     events.sort(key=lambda e: e["at"], reverse=True)
     events = events[:CHANGE_EVENT_LIMIT]
-    newest = max((e["at"] for e in events), default=to_utc_z(datetime.now(timezone.utc).isoformat()))
+    if not checked_at:
+        checked_at = to_utc_z(datetime.now(timezone.utc).isoformat())
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": newest,
-        "checked_at": newest,
+        "generated_at": checked_at,
+        "checked_at": checked_at,
         "event_count": len(events),
         "events": events,
     }
