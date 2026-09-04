@@ -79,6 +79,9 @@ _TRACKED_FIELDS = (
     "requirement_type",
     "department_ids",
     "class_ids",
+    # 改成全英語授課(或改回中文)是會影響選課決定的異動,而且很低頻 ——
+    # 不像人數那樣每四小時就動,放進事件流不會洗版。
+    "language",
 )
 
 #: 根目錄 syllabus.json 裡每個學期最多記幾門課的抓取狀態。
@@ -692,6 +695,11 @@ def _index_entry(course: Course, year: int, sem: int) -> dict[str, Any]:
         "credits": course.credits,
         "required": course.required,
         "requirement_type": course.requirement_type,
+        # 授課語言。115-1 全校 2,717 門裡有 499 門非中文(英語 488、中英雙語 11),
+        # 而「只看全英語授課」是很常見的篩選 —— 沒有它就得下載 60 個系所檔才篩得出來,
+        # 也沒有別的端點提供這個維度(不像學程有 programs.json、教室有 classrooms.json)。
+        # 代價是索引大 5.2%,值得。中文授課的值是 null。
+        "language": course.language,
         # 修課 / 撤選人數。放進索引是為了讓「算全校退選率」不必先下載 60 個
         # 系所明細檔;兩個小整數對索引大小的影響可以忽略。
         "enrolled": course.enrolled,

@@ -573,12 +573,19 @@ https://tntrock.github.io/ntut-course-crawler/
       "credits": 3.0,
       "required": false,
       "requirement_type": "專業選修",
+      "language": null,
+      "enrolled": 22,
+      "withdrawn": 0,
       "year": 115,
       "sem": 1
     }
   ]
 }
 ```
+
+索引裡的 `language` 讓「只看全英語授課」不必下載 60 個系所明細檔
+（115-1 全校 2,717 門裡有 499 門非中文：英語 488、中英雙語 11）。
+`enrolled` / `withdrawn` 同理，是為了讓算退選率只需要一個檔。
 
 頂層 `index.json` 只含 `covers` 列出的那幾個學期（目前是最新兩個）。
 **更早的學期不在裡面**，請改讀 `{semester}/index.json` —— 那些檔案抓過一次
@@ -657,6 +664,15 @@ https://tntrock.github.io/ntut-course-crawler/
 
 **注意 ★ 和 ☆ 都是「選修」**，兩者差別在共同 / 專業，不是必 / 選。
 原始資料該欄空白時 `required` 是 `null`，不是 `false`。
+
+### 授課語言
+
+`language` 空白（`null`）代表**中文授課**，不是「未知」——
+學校只在非中文的課填這一欄。115-1 全校的實際值只有 `"英語"`（488 門）
+與 `"中英雙語"`（11 門）兩種，其餘 2,218 門都是 `null`。
+
+所以「找全英語授課」的條件是 `language === "英語"`，
+「找中文授課」是 `language === null`。
 
 ### 空值
 

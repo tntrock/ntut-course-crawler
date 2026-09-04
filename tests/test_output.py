@@ -752,3 +752,52 @@ class TestEnrollmentSnapshots:
         paths = {e["path"] for e in read(tmp_path / "meta.json")["endpoints"]}
         assert "enrollment.json" in paths
         assert "{semester}/enrollment/{date}.json" in paths
+
+
+class TestIndexLanguage:
+    """授課語言在輕量索引裡。
+
+    115-1 全校 2,717 門有 499 門非中文(英語 488、中英雙語 11),而「只看全英語
+    授課」是很常見的篩選。學程有 programs.json、教室有 classrooms.json 可以
+    反查,語言沒有 —— 不放進索引就得下載 60 個系所明細檔才篩得出來。
+    """
+
+    @pytest.fixture
+    def full(self):
+        def make():
+            result = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+            result.partial = False
+            return result
+
+        return make
+
+    def test_language_is_in_the_index(self, tmp_path, full):
+        result = full()
+        write_outputs(result, tmp_path)
+
+        entries = {c["id"]: c for c in read(tmp_path / "index.json")["courses"]}
+        for course in result.courses:
+            assert entries[course.id]["language"] == course.language
+
+    def test_chinese_courses_are_null_not_blank(self, tmp_path, full):
+        """空白代表中文。要是 null,不是長度 1 的全形空白字串。"""
+        write_outputs(full(), tmp_path)
+        values = {c["language"] for c in read(tmp_path / "index.json")["courses"]}
+        assert None in values
+        assert "英語" in values, "fixture 裡有英語授課的課"
+        assert all(v is None or v.strip() for v in values)
+
+    def test_switching_to_english_is_a_change_event(self, tmp_path, full):
+        """改成全英語授課會影響選課決定,而且低頻,適合進事件流。"""
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        target = next(c for c in second.courses if c.language is None)
+        target.language = "英語"
+        write_outputs(second, tmp_path)
+
+        events = read(tmp_path / "changes.json")["events"]
+        changed = [e for e in events if e["type"] == "course_changed"]
+        assert len(changed) == 1
+        assert changed[0]["id"] == target.id
+        assert changed[0]["changes"]["language"] == {"from": None, "to": "英語"}
