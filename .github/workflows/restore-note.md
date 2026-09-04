@@ -1,8 +1,8 @@
 # 為什麼兩支 workflow 都要先「還原」那幾個檔案
 
 `crawl.yml`(每 4 小時)與 `backfill.yml`(手動回補)都會在抓取前，
-從 gh-pages 撈回 `meta.json` / `index.json` / `errors.json` / `changes.json`
-這幾個**跨學期**的檔案。
+從 gh-pages 撈回 `meta.json` / `index.json` / `errors.json` / `changes.json` /
+`enrollment.json` 這幾個**跨學期**的檔案。
 
 原因是 `write_outputs()` 每次都會重寫它們，而重寫的方式是「讀舊的 → 換掉本次學年期的部分 → 寫回去」。
 沒有舊檔可讀的話：
@@ -12,6 +12,8 @@
 - `errors.json` 會丟掉其他學期的錯誤紀錄
 - `changes.json` 會從零開始，等於每次跑完都只剩一筆紀錄，變更歷史留不住；
   而且它的比對基準就是舊的 `index.json`，沒撈回來的話每次都會判成 baseline
+- `enrollment.json` 會只剩今天那一筆,人數走勢的索引等於歸零(逐日快照
+  本身在學期子目錄裡,靠 `keep_files` 留著,不會掉)
 - `--refresh-after` / 回補的「這學期抓過了沒」判斷失去依據，每次都重抓一遍
 
 **只撈這幾個檔，不是整包。** 歷史資料有數百 MB，每 4 小時 clone 一次是浪費；

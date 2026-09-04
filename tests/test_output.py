@@ -602,3 +602,153 @@ class TestChangeLog:
         write_outputs(full(), tmp_path)
         paths = {e["path"] for e in read(tmp_path / "meta.json")["endpoints"]}
         assert "changes.json" in paths
+
+
+class TestEnrollmentSnapshots:
+    """修課 / 撤選人數的時間軸。
+
+    明細檔裡的人數是當下的值,每次抓取直接覆蓋。學期結束後那是定案的數字,
+    算退選率沒問題;但「哪門課在第幾週被大量退掉」沒留快照就永遠答不了,
+    而且錯過了要再等一個學期。
+    """
+
+    @pytest.fixture
+    def full(self):
+        def make():
+            result = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+            result.partial = False
+            return result
+
+        return make
+
+    def index(self, out):
+        return read(out / "enrollment.json")
+
+    def snapshots(self, out):
+        return self.index(out)["snapshots"]
+
+    def test_a_snapshot_file_is_written_per_day(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        entry = self.snapshots(tmp_path)[0]
+        assert entry["path"] == f"115-1/enrollment/{entry['date']}.json"
+        assert (tmp_path / entry["path"]).is_file()
+
+    def test_the_snapshot_lists_each_course(self, tmp_path, full):
+        result = full()
+        write_outputs(result, tmp_path)
+
+        entry = self.snapshots(tmp_path)[0]
+        snap = read(tmp_path / entry["path"])
+        by_id = {c["id"]: c for c in snap["courses"]}
+        for course in result.courses:
+            if course.enrolled is not None or course.withdrawn is not None:
+                assert by_id[course.id]["enrolled"] == course.enrolled
+                assert by_id[course.id]["withdrawn"] == course.withdrawn
+
+    def test_the_index_carries_the_totals(self, tmp_path, full):
+        """全校退選率的走勢只靠這一個檔就畫得出來,不必下載逐日快照。"""
+        result = full()
+        write_outputs(result, tmp_path)
+
+        entry = self.snapshots(tmp_path)[0]
+        assert entry["enrolled_total"] == sum(c.enrolled or 0 for c in result.courses)
+        assert entry["withdrawn_total"] == sum(
+            c.withdrawn or 0 for c in result.courses
+        )
+        assert entry["semester"] == "115-1"
+
+    def test_same_day_reruns_overwrite_instead_of_piling_up(self, tmp_path, full):
+        """一天跑 6 次,留下的該是當天最後一次的狀態,不是 6 筆。"""
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        second.courses[0].withdrawn = 7
+        write_outputs(second, tmp_path)
+
+        entries = self.snapshots(tmp_path)
+        assert len(entries) == 1
+        snap = read(tmp_path / entries[0]["path"])
+        assert {c["id"]: c["withdrawn"] for c in snap["courses"]}[
+            second.courses[0].id
+        ] == 7
+
+    def test_different_days_accumulate(self, tmp_path, full, monkeypatch):
+        write_outputs(full(), tmp_path)
+        # 假裝隔天又跑了一次
+        index = self.index(tmp_path)
+        index["snapshots"][0]["date"] = "2020-01-01"
+        index["snapshots"][0]["path"] = "115-1/enrollment/2020-01-01.json"
+        (tmp_path / "enrollment.json").write_text(
+            json.dumps(index, ensure_ascii=False), encoding="utf-8"
+        )
+
+        write_outputs(full(), tmp_path)
+        dates = [s["date"] for s in self.snapshots(tmp_path)]
+        assert len(dates) == 2
+        assert dates == sorted(dates, reverse=True), "最新的要排前面"
+
+    def test_old_snapshots_are_dropped_at_the_limit(self, tmp_path, full, monkeypatch):
+        monkeypatch.setattr("crawler.output.ENROLLMENT_SNAPSHOT_LIMIT", 2)
+        write_outputs(full(), tmp_path)
+
+        index = self.index(tmp_path)
+        index["snapshots"] = [
+            {**index["snapshots"][0], "date": f"2020-01-0{n}"} for n in (1, 2, 3)
+        ]
+        (tmp_path / "enrollment.json").write_text(
+            json.dumps(index, ensure_ascii=False), encoding="utf-8"
+        )
+
+        write_outputs(full(), tmp_path)
+        assert len(self.snapshots(tmp_path)) == 2
+
+    def test_a_semester_without_headcounts_writes_nothing(self, tmp_path, full):
+        """太舊的學期整欄都是空的,寫一份全 null 的快照沒有意義。"""
+        result = full()
+        for course in result.courses:
+            course.enrolled = None
+            course.withdrawn = None
+        write_outputs(result, tmp_path)
+
+        assert not (tmp_path / "enrollment.json").exists()
+        assert not (tmp_path / "115-1" / "enrollment").exists()
+
+    def test_partial_crawls_write_no_snapshot(self, tmp_path, full):
+        """--dept 只抓幾個系所,總計會是錯的。"""
+        partial = full()
+        partial.partial = True
+        write_outputs(partial, tmp_path)
+        assert not (tmp_path / "enrollment.json").exists()
+
+    def test_headcounts_are_in_the_index_too(self, tmp_path, full):
+        """算全校退選率不該需要先下載 60 個系所明細檔。"""
+        write_outputs(full(), tmp_path)
+        entry = read(tmp_path / "index.json")["courses"][0]
+        assert "enrolled" in entry and "withdrawn" in entry
+
+    def test_headcount_changes_do_not_flood_the_change_feed(self, tmp_path, full):
+        """加退選期間每 4 小時就有上千門課的人數在動。
+
+        放進 changes.json 會每次都觸發 bulk_change,把真正的結構性異動
+        (加開、停開、調課、換老師)整個淹掉 —— 兩者變動頻率差一個數量級。
+        """
+        write_outputs(full(), tmp_path)
+        before = len(read(tmp_path / "changes.json")["events"])
+
+        second = full()
+        for course in second.courses:
+            course.enrolled = (course.enrolled or 0) + 5
+            course.withdrawn = (course.withdrawn or 0) + 1
+        write_outputs(second, tmp_path)
+
+        after = read(tmp_path / "changes.json")["events"]
+        assert len(after) == before, "人數變動不該產生任何異動事件"
+        # 但快照要記下來
+        entry = self.snapshots(tmp_path)[0]
+        assert entry["withdrawn_total"] == sum(c.withdrawn for c in second.courses)
+
+    def test_meta_advertises_the_endpoints(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        paths = {e["path"] for e in read(tmp_path / "meta.json")["endpoints"]}
+        assert "enrollment.json" in paths
+        assert "{semester}/enrollment/{date}.json" in paths

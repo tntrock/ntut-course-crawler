@@ -80,8 +80,10 @@ class Course:
     time_slots: list[TimeSlot] = field(default_factory=list)
     classrooms: list[str] = field(default_factory=list)
     classroom_codes: list[str] = field(default_factory=list)  # Croom.jsp 的 code
-    quota: int | None = None  # 人數
-    withdrawn: int | None = None  # 撤選人數
+    #: 修課人數(原始頁面的「人」欄)。**不是名額上限** —— 114-2 全校有 111 種
+    #: 不同的值、只有 21% 是 5 的倍數,名額上限不會長這樣。
+    enrolled: int | None = None
+    withdrawn: int | None = None  # 撤選人數(原始頁面的「撤」欄)
     language: str | None = None  # 授課語言,空白代表中文
     syllabus_url: str | None = None
     notes: str | None = None  # 備註,例 "資工四和資工所合開"
@@ -107,7 +109,11 @@ class Course:
             "time_slots": [slot.to_dict() for slot in self.time_slots],
             "classrooms": list(self.classrooms),
             "classroom_codes": list(self.classroom_codes),
-            "quota": self.quota,
+            "enrolled": self.enrolled,
+            # `quota` 是 `enrolled` 的舊名,語意上一直是修課人數而不是名額上限。
+            # 名字會誤導拿它算比率的人(以為分母是容量),所以改名;舊欄位保留
+            # 不刪 —— README 的相容性承諾是「只新增、不改既有欄位」。
+            "quota": self.enrolled,
             "withdrawn": self.withdrawn,
             "language": self.language,
             "syllabus_url": self.syllabus_url,

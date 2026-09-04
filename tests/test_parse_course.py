@@ -120,10 +120,19 @@ class TestFixtureCourses:
         assert by_id["364893"].language is None
         assert by_id["361345"].language == "英語"
 
-    def test_quota_and_withdrawn(self, by_id):
-        assert by_id["364893"].quota == 22
+    def test_enrolled_and_withdrawn(self, by_id):
+        assert by_id["364893"].enrolled == 22
         assert by_id["364893"].withdrawn == 0
-        assert by_id["361339"].quota == 0
+        assert by_id["361339"].enrolled == 0
+
+    def test_quota_is_kept_as_an_alias_of_enrolled(self, by_id):
+        """`quota` 是舊名,語意一直是修課人數而不是名額上限。
+
+        改名是因為原本的名字會誤導拿它算退選率的人(以為分母是容量),
+        但舊欄位不能刪 —— 相容性承諾是只新增、不改既有欄位。
+        """
+        payload = by_id["364893"].to_dict()
+        assert payload["enrolled"] == payload["quota"] == 22
 
     def test_notes(self, by_id):
         assert by_id["364893"].notes == "資工四和資工所合開"
@@ -193,7 +202,7 @@ class TestDegradedInput:
         html = build_page(row(id="123456", name="測試", credits="待定", quota="不限"))
         with caplog.at_level("WARNING"):
             c = parse_courses(html)[0]
-        assert c.credits is None and c.quota is None
+        assert c.credits is None and c.enrolled is None
 
     def test_page_without_course_table(self):
         assert parse_courses("<html><body>本班無課程</body></html>") == []

@@ -255,7 +255,8 @@ class TestOutputFiles:
         assert set(entry) == {
             "id", "name_zh", "teachers", "teacher_codes", "time_slots",
             "department_ids", "class_ids", "credits",
-            "required", "requirement_type", "year", "sem",
+            "required", "requirement_type", "enrolled", "withdrawn",
+            "year", "sem",
         }
         assert "classrooms" not in entry and "syllabus_url" not in entry
 

@@ -21,7 +21,7 @@ import json
 import logging
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -66,6 +66,10 @@ CHANGE_SAMPLE_LIMIT = 10
 #: 拿來判斷「這門課有沒有變」的欄位。取自索引項目 —— 索引本來就是
 #: 「篩選 / 搜尋會用到」的那些欄位,剛好也就是異動了會影響到人的那些。
 #: 刻意不比 `teacher_codes`(跟 `teachers` 連動)。
+#:
+#: **也刻意不比 `enrolled` / `withdrawn`。** 加退選期間每四小時就有上千門課
+#: 的人數在動,放進來會讓事件流每次都爆掉 bulk_change,把真正的結構性異動
+#: (加開、停開、調課、換老師)整個淹掉。人數的時間軸另外走 enrollment.json。
 _TRACKED_FIELDS = (
     "name_zh",
     "teachers",
@@ -76,6 +80,15 @@ _TRACKED_FIELDS = (
     "department_ids",
     "class_ids",
 )
+
+#: 根目錄 enrollment.json 保留幾筆快照索引。一個學期約 120 天,
+#: 400 筆容得下三個學期的重疊期。
+ENROLLMENT_SNAPSHOT_LIMIT = 400
+
+#: 台灣時區。學校的「今天」是這個時區的今天,快照按日分檔要用它切,
+#: 不然 UTC 午夜會落在台灣早上八點,把一天從中間切成兩半。
+#: 台灣沒有日光節約時間,固定 +8 就是正確的,不必依賴 tzdata。
+TAIPEI = timezone(timedelta(hours=8))
 
 #: 每次完整抓取都會整個重建的子目錄。不先清掉的話,
 #: 上一輪留下的班級 / 教師檔會變成永遠不會更新的幽靈資料。
@@ -106,6 +119,7 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_classrooms(result, semester_dir, pretty)
     _write_schedule(result, semester_dir, pretty)
     _write_semester_index(result, semester_dir, pretty)
+    _write_enrollment_snapshot(result, semester_dir, out_dir, pretty)
 
     # 跨學期
     # 變更紀錄要先算 —— 它的比對基準就是還沒被蓋掉的舊 index.json
@@ -463,6 +477,119 @@ def _day_name(day: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# 修課 / 撤選人數的時間軸
+# --------------------------------------------------------------------------
+def _write_enrollment_snapshot(
+    result: "CrawlResult", semester_dir: Path, out_dir: Path, pretty: bool
+) -> None:
+    """每天存一份修課 / 撤選人數的快照,並更新根目錄的索引。
+
+    明細檔裡的人數是**當下**的值,每次抓取直接覆蓋 —— 學期結束後那是定案的
+    數字,拿來算退選率沒問題;但「哪門課在第幾週被大量退掉」這種問題,
+    快照沒留下來就永遠答不了,而且錯過了就要再等一個學期。
+
+    **刻意不走 `changes.json`。** 加退選期間每 4 小時就有上千門課的人數在動,
+    塞進事件流會每次都觸發 bulk_change,把真正的結構性異動(加開、停開、
+    調課、換老師)整個淹掉。兩種資料的變動頻率差一個數量級,不該共用一個檔。
+
+    一天一檔(依台灣時區切),同一天內重複抓取就覆蓋當天那份 —— 於是每天
+    留下的是當天最後一次的狀態。檔案只新增不改寫,對 gh-pages 的歷史很友善。
+    """
+    if result.partial:
+        log.info("局部抓取(--dept),略過人數快照")
+        return
+
+    rows = [
+        {"id": c.id, "enrolled": c.enrolled, "withdrawn": c.withdrawn}
+        for c in result.courses
+        if c.enrolled is not None or c.withdrawn is not None
+    ]
+    if not rows:
+        # 太舊的學期整欄都是空的,寫一份全 null 的快照沒有意義
+        log.info("%s 沒有任何人數資料,略過人數快照", result.semester)
+        return
+
+    now = datetime.now(timezone.utc)
+    date = now.astimezone(TAIPEI).strftime("%Y-%m-%d")
+    enrolled_total = sum(r["enrolled"] or 0 for r in rows)
+    withdrawn_total = sum(r["withdrawn"] or 0 for r in rows)
+
+    payload = _envelope(result)
+    payload["date"] = date
+    payload["at"] = _now()
+    payload["course_count"] = len(rows)
+    payload["enrolled_total"] = enrolled_total
+    payload["withdrawn_total"] = withdrawn_total
+    payload["courses"] = sorted(rows, key=lambda r: r["id"])
+    _write_json(semester_dir / "enrollment" / f"{date}.json", payload, pretty)
+
+    log.info(
+        "%s 人數快照 %s:%d 門課,修課 %d 人次 / 撤選 %d 人次",
+        result.semester,
+        date,
+        len(rows),
+        enrolled_total,
+        withdrawn_total,
+    )
+
+    _update_enrollment_index(
+        out_dir,
+        {
+            "semester": result.semester,
+            "year": result.year,
+            "sem": result.sem,
+            "date": date,
+            "at": payload["at"],
+            "course_count": len(rows),
+            "enrolled_total": enrolled_total,
+            "withdrawn_total": withdrawn_total,
+            "path": f"{result.semester}/enrollment/{date}.json",
+        },
+        pretty,
+    )
+
+
+def _update_enrollment_index(
+    out_dir: Path, entry: dict[str, Any], pretty: bool
+) -> None:
+    """根目錄的 `enrollment.json`:有哪幾天的快照,以及當天的總計。
+
+    放根目錄而不是學期目錄下,是為了能跟 meta / index / errors / changes 一起
+    被 workflow 還原 —— 學期目錄的檔案不在 sparse checkout 的範圍內,
+    每次抓取都會看不到既有紀錄,索引就永遠只剩今天那一筆。
+
+    只放總計不放逐課明細:光是「全校退選率隨時間的走勢」就靠這一個檔,
+    要看是哪幾門課再去拿當天的快照。
+    """
+    path = Path(out_dir) / "enrollment.json"
+    existing = _read_json(path) or {}
+    kept = [
+        s
+        for s in existing.get("snapshots", [])
+        if isinstance(s, dict)
+        and (s.get("semester"), s.get("date")) != (entry["semester"], entry["date"])
+    ]
+    snapshots = [entry] + kept
+    # 新的在前:先比日期再比學期,同一天有多個學期時新的學期排前面
+    snapshots.sort(
+        key=lambda s: (str(s.get("date")), s.get("year") or 0, s.get("sem") or 0),
+        reverse=True,
+    )
+    snapshots = snapshots[:ENROLLMENT_SNAPSHOT_LIMIT]
+
+    _write_json(
+        path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "snapshot_count": len(snapshots),
+            "snapshots": snapshots,
+        },
+        pretty,
+    )
+
+
+# --------------------------------------------------------------------------
 # 索引
 # --------------------------------------------------------------------------
 def _index_entry(course: Course, year: int, sem: int) -> dict[str, Any]:
@@ -482,6 +609,10 @@ def _index_entry(course: Course, year: int, sem: int) -> dict[str, Any]:
         "credits": course.credits,
         "required": course.required,
         "requirement_type": course.requirement_type,
+        # 修課 / 撤選人數。放進索引是為了讓「算全校退選率」不必先下載 60 個
+        # 系所明細檔;兩個小整數對索引大小的影響可以忽略。
+        "enrolled": course.enrolled,
+        "withdrawn": course.withdrawn,
         "year": year,
         "sem": sem,
     }
@@ -890,6 +1021,11 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "{semester}/schedule.json", "description": "星期 × 節次 → 課號"},
         {"path": "errors.json", "description": "各學期抓取失敗的單位"},
         {"path": "changes.json", "description": "最近的課程與教師異動事件"},
+        {"path": "enrollment.json", "description": "修課 / 撤選人數快照的索引"},
+        {
+            "path": "{semester}/enrollment/{date}.json",
+            "description": "某一天的逐課修課 / 撤選人數",
+        },
     ]
 
 
