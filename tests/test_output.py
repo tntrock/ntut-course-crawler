@@ -289,10 +289,11 @@ class TestIndexCoverage:
 
 
 class TestChangeLog:
-    """`changes.json`:讓「這次跑完到底改了什麼」用眼睛就看得出來。
+    """`changes.json`:一條「最近發生了什麼」的事件流。
 
-    每 4 小時重寫一整包 JSON,光看檔案時間戳分不出「重跑了」和「真的變了」。
-    人工要確認學校是不是動了課,不該只能自己下載前後兩版來 diff。
+    每 4 小時重寫一整包 JSON,光看檔案時間戳分不出「只是重跑」和「學校真的
+    動了課」。這個檔要能直接讀開頭幾筆就知道最近的異動 —— 所以是**一筆異動
+    一個事件、各自帶時間戳**,不是「這輪 vs 上輪」的批次 diff。
     """
 
     @pytest.fixture
@@ -306,53 +307,81 @@ class TestChangeLog:
 
         return make
 
-    def log(self, out):
-        return read(out / "changes.json")["changes"]
+    def feed(self, out):
+        return read(out / "changes.json")
 
-    def test_first_run_is_recorded_as_a_baseline(self, tmp_path, full):
-        write_outputs(full(), tmp_path)
-        entries = self.log(tmp_path)
-        assert len(entries) == 1
-        assert entries[0]["baseline"] is True
-        assert entries[0]["semester"] == "115-1"
-        assert entries[0]["course_count"] == 6
-        # baseline 沒有基準可比,不該憑空報「新增 6 門課」
-        assert "added" not in entries[0]
+    def events(self, out, kind=None):
+        items = self.feed(out)["events"]
+        return [e for e in items if kind is None or e["type"] == kind]
 
-    def test_an_unchanged_rerun_appends_nothing(self, tmp_path, full):
-        write_outputs(full(), tmp_path)
-        write_outputs(full(), tmp_path)
-        assert len(self.log(tmp_path)) == 1, "一天 6 次「沒變」會把真正的異動洗掉"
+    # -- 基本形狀 -----------------------------------------------------------
 
-    def test_a_removed_course_is_recorded(self, tmp_path, full):
+    def test_first_run_is_a_baseline_not_a_mass_add(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        events = self.events(tmp_path)
+        assert len(events) == 1
+        assert events[0]["type"] == "baseline"
+        assert events[0]["course_count"] == 6
+        assert events[0]["semester"] == "115-1"
+
+    def test_an_unchanged_rerun_adds_no_event(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        write_outputs(full(), tmp_path)
+        assert len(self.events(tmp_path)) == 1, "沒異動就不該有事件"
+
+    def test_checked_at_advances_even_with_no_events(self, tmp_path, full):
+        """「學校沒動」和「爬蟲壞了好幾天沒跑」必須分得出來。"""
+        write_outputs(full(), tmp_path)
+        first = self.feed(tmp_path)["checked_at"]
+        write_outputs(full(), tmp_path)
+        assert self.feed(tmp_path)["checked_at"] >= first
+
+    def test_every_event_carries_its_own_timestamp(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        second = full()
+        second.courses.pop(0)
+        write_outputs(second, tmp_path)
+
+        for event in self.events(tmp_path):
+            assert event["at"].endswith("Z")
+            assert event["semester"] == "115-1"
+
+    def test_newest_events_come_first(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+        second = full()
+        second.courses.pop(0)
+        write_outputs(second, tmp_path)
+
+        events = self.events(tmp_path)
+        assert events[0]["type"] == "course_removed"
+        assert events[-1]["type"] == "baseline", "舊事件要留在後面"
+
+    # -- 課程 ---------------------------------------------------------------
+
+    def test_a_removed_course_is_an_event(self, tmp_path, full):
         write_outputs(full(), tmp_path)
 
         second = full()
         gone = second.courses.pop(0)
         write_outputs(second, tmp_path)
 
-        latest = self.log(tmp_path)[0]
-        assert latest["removed_count"] == 1
-        assert latest["added_count"] == 0
-        assert latest["removed"][0]["id"] == gone.id
-        assert latest["removed"][0]["name_zh"] == gone.name_zh
-        assert latest["previous_course_count"] == 6
-        assert latest["course_count"] == 5
+        event = self.events(tmp_path, "course_removed")[0]
+        assert event["id"] == gone.id
+        assert event["name"] == gone.name_zh
+        assert event["department_ids"] == ["59"]
 
-    def test_an_added_course_is_recorded(self, tmp_path, full):
-        # 先用少一門的當基準,再寫完整的,等同於「學校加開了一門」
+    def test_an_added_course_is_an_event(self, tmp_path, full):
         before = full()
         newcomer = before.courses.pop()
         write_outputs(before, tmp_path)
         write_outputs(full(), tmp_path)
 
-        latest = self.log(tmp_path)[0]
-        assert latest["added_count"] == 1
-        assert latest["removed_count"] == 0
-        assert latest["added"][0]["id"] == newcomer.id
-        assert latest["added"][0]["name_zh"] == newcomer.name_zh
+        event = self.events(tmp_path, "course_added")[0]
+        assert event["id"] == newcomer.id
+        assert event["name"] == newcomer.name_zh
+        assert not self.events(tmp_path, "course_removed")
 
-    def test_a_changed_teacher_shows_the_before_and_after(self, tmp_path, full):
+    def test_a_changed_course_shows_before_and_after(self, tmp_path, full):
         write_outputs(full(), tmp_path)
 
         second = full()
@@ -361,14 +390,11 @@ class TestChangeLog:
         target.teacher_codes = ["99999"]
         write_outputs(second, tmp_path)
 
-        latest = self.log(tmp_path)[0]
-        assert latest["modified_count"] == 1
-        entry = latest["modified"][0]
-        assert entry["id"] == target.id
-        assert entry["fields"]["teachers"]["to"] == ["新老師"]
-        assert entry["fields"]["teachers"]["from"] != ["新老師"]
-        # 沒動到的欄位不該出現
-        assert "credits" not in entry["fields"]
+        event = self.events(tmp_path, "course_changed")[0]
+        assert event["id"] == target.id
+        assert event["changes"]["teachers"]["to"] == ["新老師"]
+        assert event["changes"]["teachers"]["from"] != ["新老師"]
+        assert "credits" not in event["changes"], "沒動到的欄位不該出現"
 
     def test_a_changed_time_slot_is_caught(self, tmp_path, full):
         """調課是最需要被看見的異動之一。"""
@@ -379,46 +405,109 @@ class TestChangeLog:
         target.time_slots = []
         write_outputs(second, tmp_path)
 
-        latest = self.log(tmp_path)[0]
-        assert "time_slots" in latest["modified"][0]["fields"]
+        assert "time_slots" in self.events(tmp_path, "course_changed")[0]["changes"]
 
-    def test_newest_record_comes_first(self, tmp_path, full):
+    # -- 教師 ---------------------------------------------------------------
+
+    def test_a_teacher_who_stops_teaching_is_an_event(self, tmp_path, full):
+        """課還在、只是換人上,課程端看不出少了誰 —— 教師端才看得到。"""
         write_outputs(full(), tmp_path)
+
         second = full()
+        target = next(c for c in second.courses if c.teacher_codes == ["12095"])
+        target.teachers = ["接手的人"]
+        target.teacher_codes = ["99999"]
+        write_outputs(second, tmp_path)
+
+        removed = self.events(tmp_path, "teacher_removed")
+        added = self.events(tmp_path, "teacher_added")
+        assert [e["id"] for e in removed] == ["12095"]
+        assert removed[0]["name"] == "白敦文"
+        assert removed[0]["course_count"] == 1, "消失前開了幾門課"
+        assert removed[0]["department_ids"] == ["59"]
+        assert [e["id"] for e in added] == ["99999"]
+        assert added[0]["name"] == "接手的人"
+
+    def test_a_teacher_is_keyed_by_code_not_name(self, tmp_path, full):
+        """115-1 實測 803 個代碼只對到 801 個姓名,確實有同名老師。
+
+        用姓名當 key 的話,其中一位停開就會誤報成「這位老師消失了」。
+        """
+        first = full()
+        first.courses[0].teachers = ["王小明"]
+        first.courses[0].teacher_codes = ["10001"]
+        first.courses[1].teachers = ["王小明"]
+        first.courses[1].teacher_codes = ["10002"]
+        write_outputs(first, tmp_path)
+
+        second = full()
+        second.courses[0].teachers = ["王小明"]
+        second.courses[0].teacher_codes = ["10001"]
+        second.courses[1].teachers = ["王小明"]
+        second.courses[1].teacher_codes = ["10002"]
+        second.courses.pop(1)  # 同名的其中一位停開
+        write_outputs(second, tmp_path)
+
+        removed = self.events(tmp_path, "teacher_removed")
+        assert [e["id"] for e in removed] == ["10002"]
+
+    def test_removing_a_course_removes_its_only_teacher(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        gone = next(c for c in second.courses if c.teacher_codes == ["12095"])
+        second.courses.remove(gone)
+        write_outputs(second, tmp_path)
+
+        assert [e["id"] for e in self.events(tmp_path, "teacher_removed")] == ["12095"]
+        assert [e["id"] for e in self.events(tmp_path, "course_removed")] == [gone.id]
+
+    def test_a_teacher_still_teaching_elsewhere_is_not_reported(self, tmp_path, full):
+        """只是少開一門課,人還在,不該報成「老師消失了」。"""
+        first = full()
+        for course in first.courses[:2]:
+            course.teachers = ["王正豪"]
+            course.teacher_codes = ["10864"]
+        write_outputs(first, tmp_path)
+
+        second = full()
+        for course in second.courses[:2]:
+            course.teachers = ["王正豪"]
+            course.teacher_codes = ["10864"]
         second.courses.pop(0)
         write_outputs(second, tmp_path)
 
-        entries = self.log(tmp_path)
-        assert len(entries) == 2
-        assert entries[0]["removed_count"] == 1
-        assert entries[1]["baseline"] is True
+        assert not [
+            e for e in self.events(tmp_path, "teacher_removed") if e["id"] == "10864"
+        ]
 
-    def test_old_records_are_dropped_at_the_limit(self, tmp_path, full, monkeypatch):
-        monkeypatch.setattr("crawler.output.CHANGE_LOG_LIMIT", 3)
-        for n in range(6):
-            result = full()
-            # 每一輪都拿掉不同數量的課,確保每次都有異動可記
-            result.courses = result.courses[: 6 - n]
-            write_outputs(result, tmp_path)
+    # -- 保護機制 -----------------------------------------------------------
 
-        entries = self.log(tmp_path)
-        assert len(entries) == 3
-        assert entries[0]["course_count"] == 1, "留下的要是最新的那幾筆"
-
-    def test_long_detail_lists_are_truncated(self, tmp_path, full, monkeypatch):
-        monkeypatch.setattr("crawler.output.CHANGE_DETAIL_LIMIT", 2)
+    def test_a_huge_batch_is_collapsed_into_a_summary(self, tmp_path, full, monkeypatch):
+        """一次幾百筆通常是抓歪了。照實寫會把先前真正的異動整個推出保留範圍。"""
+        monkeypatch.setattr("crawler.output.CHANGE_BULK_THRESHOLD", 2)
         write_outputs(full(), tmp_path)
 
         second = full()
         second.courses = second.courses[:1]  # 一口氣少 5 門
         write_outputs(second, tmp_path)
 
-        latest = self.log(tmp_path)[0]
-        assert latest["removed_count"] == 5, "count 一定要是真實數量"
-        assert len(latest["removed"]) == 3  # 2 筆明細 + 1 筆截斷說明
-        assert latest["removed"][-1] == {"truncated": 3}
+        events = self.events(tmp_path)
+        assert events[0]["type"] == "bulk_change"
+        assert events[0]["counts"]["course_removed"] == 5
+        assert events[0]["event_count"] > 2
+        assert events[1]["type"] == "baseline", "先前的事件要留著"
 
-    def test_partial_crawls_never_write_a_change_record(self, tmp_path, full):
+    def test_old_events_are_dropped_at_the_limit(self, tmp_path, full, monkeypatch):
+        monkeypatch.setattr("crawler.output.CHANGE_EVENT_LIMIT", 3)
+        for n in range(6):
+            result = full()
+            result.courses = result.courses[: 6 - n]
+            write_outputs(result, tmp_path)
+
+        assert len(self.events(tmp_path)) == 3
+
+    def test_partial_crawls_never_write_an_event(self, tmp_path, full):
         """--dept 只抓幾個系所,拿它跟全校索引比會得到「移除兩千門課」。"""
         write_outputs(full(), tmp_path)
 
@@ -427,19 +516,19 @@ class TestChangeLog:
         partial.courses = partial.courses[:1]
         write_outputs(partial, tmp_path)
 
-        assert len(self.log(tmp_path)) == 1
+        assert len(self.events(tmp_path)) == 1
 
-    def test_a_backfilled_old_semester_is_a_baseline_not_a_mass_add(self, tmp_path, full):
-        """回補歷史學期時,頂層索引裡沒有它 —— 那是「第一次抓」,不是「新增」。"""
+    def test_a_backfilled_old_semester_is_a_baseline(self, tmp_path, full):
+        """回補歷史學期時頂層索引裡沒有它 —— 那是「第一次抓」,不是「新增」。"""
         write_outputs(full(), tmp_path)
 
         old = crawl(FakeFetcher(), 100, 1, only_departments=["59"])
         old.partial = False
         write_outputs(old, tmp_path)
 
-        latest = self.log(tmp_path)[0]
+        latest = self.events(tmp_path)[0]
+        assert latest["type"] == "baseline"
         assert latest["semester"] == "100-1"
-        assert latest["baseline"] is True
 
     def test_meta_advertises_the_endpoint(self, tmp_path, full):
         write_outputs(full(), tmp_path)

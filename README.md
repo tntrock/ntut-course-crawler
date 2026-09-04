@@ -39,7 +39,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | **某個學程**有哪些課 | `{semester}/programs.json` | |
 | **某間教室**排了什麼課 | `{semester}/classrooms.json` | |
 | **星期幾第幾節**有什麼課（找空堂、擋修衝堂） | `{semester}/schedule.json` | |
-| 上次抓取有沒有課異動（加開、停開、調課、換老師） | `changes.json` | |
+| 最近有哪些課 / 老師被加開、停開、調課、換人 | `changes.json` | |
 
 不知道代碼？先拉 `{semester}/departments.json`、`teachers.json`、`classes.json`，
 每一筆都附了 `path` 欄位，直接接在 base URL 後面就是明細檔的網址。
@@ -51,7 +51,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 13 KB |
 | `index.json` | **最新兩個學期**的課程輕量索引 | 1.5 MB（gzip 149 KB）|
 | `errors.json` | 各學期抓取失敗的單位（目前 51 個學期全部為空） | < 1 KB |
-| `changes.json` | 最近幾次抓取偵測到的課程異動（見下） | 隨異動量變動 |
+| `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
 | `{semester}/courses/{department_id}.json` | 系所課表（完整課程物件） | 60 檔，共 1.5 MB |
@@ -72,45 +72,66 @@ https://tntrock.github.io/ntut-course-crawler/
 `programs.json` / `classrooms.json` / `schedule.json` 只放課號 —— 拿課號去
 `{semester}/index.json` 或系所明細檔查即可，避免同一份課程資料被複製太多份。
 
-### `changes.json`：課程異動紀錄
+### `changes.json`：最近的異動
 
 排程每 4 小時重跑一次，但**大部分時候資料一個字都沒變**。光看檔案時間戳
 分不出「只是重跑」和「學校真的動了課」，要確認就得自己下載前後兩版來 diff。
-`changes.json` 就是把這件事寫下來。
 
-每次抓完會拿新結果跟**上一輪的 `index.json`** 比對，只有真的有差異才追加一筆：
+`changes.json` 是一條**事件流**：一筆異動一個事件、各自帶偵測到的時間，
+最新的在最前面。想知道最近發生什麼，讀開頭幾筆就好。
 
 ```json
 {
-  "generated_at": "2026-09-04T12:03:11Z",
-  "semester": "115-1",
-  "course_count": 2454,
-  "previous_course_count": 2455,
-  "added_count": 0,
-  "removed_count": 1,
-  "modified_count": 2,
-  "added": [],
-  "removed": [{ "id": "364899", "name_zh": "數位影像處理", "teachers": ["白敦文"], ... }],
-  "modified": [
+  "checked_at": "2026-09-04T12:03:11Z",
+  "event_count": 4,
+  "events": [
     {
-      "id": "364893",
-      "name_zh": "計算機概論",
-      "fields": { "teachers": { "from": ["王正豪"], "to": ["王正豪", "陳香君"] } }
+      "at": "2026-09-04T12:03:11Z", "semester": "115-1",
+      "type": "course_removed",
+      "id": "361339", "name": "體育",
+      "teachers": [], "department_ids": ["59"], "class_ids": ["2915"]
+    },
+    {
+      "at": "2026-09-04T12:03:11Z", "semester": "115-1",
+      "type": "course_changed",
+      "id": "364893", "name": "數位影像處理",
+      "teachers": ["陳香君"], "department_ids": ["59"], "class_ids": ["2915"],
+      "changes": { "teachers": { "from": ["白敦文"], "to": ["陳香君"] } }
+    },
+    {
+      "at": "2026-09-04T08:03:07Z", "semester": "115-1",
+      "type": "teacher_removed",
+      "id": "12095", "name": "白敦文",
+      "course_count": 1, "department_ids": ["59"]
     }
   ]
 }
 ```
 
-- 最新的紀錄在 `changes[0]`，最多保留 200 筆。
-- 比對的欄位是課名、教師、時段、學分、必選修、開課系所、班級。
-- **只有最新兩個學期有紀錄** —— 比對基準是頂層 `index.json`，它只涵蓋那兩個。
-  第一次抓到某個學期時沒有基準可比，會記成 `"baseline": true` 而不是
-  「新增兩千多門課」。
-- 單一類別的明細超過 100 筆會截斷，末尾補一筆 `{"truncated": N}`；
-  `*_count` 一定是真實數量。
+| `type` | 意思 | 特有欄位 |
+|---|---|---|
+| `course_added` | 加開一門課 | |
+| `course_removed` | 停開一門課 | |
+| `course_changed` | 課的內容變了 | `changes`（逐欄位的 `from` / `to`） |
+| `teacher_added` | 這學期多了一位老師 | `course_count`（他開幾門課） |
+| `teacher_removed` | 這學期少了一位老師 | `course_count`（消失前開幾門課） |
+| `baseline` | 第一次抓到這個學期，沒有基準可比 | `course_count` |
+| `bulk_change` | 一次異動量異常，只記摘要 | `event_count`、`counts` |
 
-異動量突然暴增（例如幾百門課同時「消失」）通常不是學校真的動了那麼多，
-而是版面改了或抓歪了 —— 那是該去看 Actions 記錄的訊號。
+- **`at` 是偵測到的時間，不是學校異動的時間** —— 實際異動發生在上一次抓取
+  與這次之間，最多相差 4 小時。
+- `checked_at` 是最後一次比對的時間，**沒有異動時也會更新**。所以
+  「`checked_at` 是今天但沒有新事件」＝學校真的沒動；
+  「`checked_at` 停在三天前」＝爬蟲沒在跑。
+- `course_changed` 比對的欄位是課名、教師、時段、學分、必選修、開課系所、班級。
+- **教師事件是用教師代碼比對的**，不是姓名 —— 115-1 實測 803 個代碼只對到
+  801 個姓名，確實有同名老師。換人授課時課還在，只有教師端看得出少了誰。
+- 最多保留 500 筆事件。
+- **只有最新兩個學期會產生事件** —— 比對基準是頂層 `index.json`，它只涵蓋
+  那兩個。第一次抓到某個學期時記成 `baseline`，不會變成「新增兩千多門課」。
+- 單次超過 200 筆異動會折成一筆 `bulk_change`。學校端的正常異動是個位數，
+  一口氣幾百筆通常是版面改了或抓歪了 —— 照實逐筆寫進去只會把先前真正的
+  異動整個推出保留範圍，那是這個檔最不該失效的時候。
 
 ### 為什麼檔名是代碼而不是中文？
 

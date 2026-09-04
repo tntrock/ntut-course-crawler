@@ -44,14 +44,14 @@ DISCLAIMER = (
 #: 一律先驗證再拿去組路徑,免得哪天頁面壞掉就寫出 `../../etc` 這種檔名。
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-#: changes.json 最多保留幾筆變更紀錄。一天 6 次排程、只有真的有異動才記一筆,
-#: 200 筆大概是好幾個月份 —— 夠人工回溯,又不會讓檔案無限長大。
-CHANGE_LOG_LIMIT = 200
+#: changes.json 最多保留幾筆異動事件。只有真的有異動才會長,
+#: 500 筆大概是好幾個月份 —— 夠人工回溯,又不會讓檔案無限長大。
+CHANGE_EVENT_LIMIT = 500
 
-#: 單筆紀錄裡每一類異動最多列幾門課的明細。學校端的正常異動是個位數;
-#: 一次幾百筆通常代表版面改了或抓歪了,那種情況列出全部只會洗版,
-#: 看 count 就夠判斷「該去查了」。
-CHANGE_DETAIL_LIMIT = 100
+#: 單次抓取超過這麼多筆異動就折成一筆摘要,不逐筆列出。
+#: 學校端的正常異動是個位數;一口氣幾百筆通常是版面改了或抓歪了,
+#: 照實寫進去只會把先前真正的異動整個推出保留範圍。
+CHANGE_BULK_THRESHOLD = 200
 
 #: 拿來判斷「這門課有沒有變」的欄位。取自索引項目 —— 索引本來就是
 #: 「篩選 / 搜尋會用到」的那些欄位,剛好也就是異動了會影響到人的那些。
@@ -493,18 +493,15 @@ def _write_semester_index(
 # 變更紀錄
 # --------------------------------------------------------------------------
 def _write_changes(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
-    """把這一輪相對於上一輪的課程異動追加進 `changes.json`。
+    """把這一輪偵測到的異動,逐筆追加進 `changes.json` 的事件流。
 
-    每 4 小時跑一次、每次都重寫一整包 JSON,光看檔案時間戳根本不知道
-    「這次到底改了什麼」——「115-1 少了一門課」這種事只能靠下載前後兩版
-    自己 diff 才看得出來。這個檔就是為了讓那件事變成用眼睛看的。
+    每 4 小時重寫一整包 JSON,光看檔案時間戳分不出「只是重跑」和「學校真的
+    動了課」。這個檔就是把「最近發生了什麼」寫下來:**一筆異動一個事件**,
+    最新的在最前面,直接讀開頭幾筆就是最近的異動。
 
     比對基準是**上一輪的頂層 `index.json`**(所以必須在 `_write_index`
     覆蓋它之前呼叫)。基準只涵蓋最新的 `INDEX_SEMESTERS` 個學期,回補歷史
-    學期時沒有東西可比,會記成一筆 baseline 而不是「新增兩千多門課」。
-
-    **沒有異動就不寫**。一天 6 次排程,課程多半原封不動;每次都追加一筆
-    「沒變」只會把真正的異動洗掉。
+    學期時沒有東西可比,會記一筆 baseline 而不是「新增兩千多門課」。
     """
     if result.partial:
         # --dept 只抓了幾個系所,拿它跟全校的索引比會得到「移除兩千門課」
@@ -513,52 +510,169 @@ def _write_changes(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
 
     baseline = _previous_index_entries(out_dir, result.year, result.sem)
     current = {c.id: _index_entry(c, result.year, result.sem) for c in result.courses}
-
-    entry: dict[str, Any] = {
-        "generated_at": _now(),
-        "semester": result.semester,
-        "year": result.year,
-        "sem": result.sem,
-        "course_count": len(current),
-    }
+    stamp = _now()
 
     if baseline is None:
         # 第一次抓這個學期,或它已經被擠出頂層索引的涵蓋範圍
-        log.info("%s 沒有可比對的基準,記為 baseline", result.semester)
-        entry["baseline"] = True
-        _append_change(out_dir, entry, pretty)
-        return
+        log.info("%s 沒有可比對的基準,記一筆 baseline", result.semester)
+        events = [
+            {
+                "at": stamp,
+                "semester": result.semester,
+                "type": "baseline",
+                "course_count": len(current),
+            }
+        ]
+    else:
+        events = _course_events(baseline, current, result.semester, stamp)
+        events += _teacher_events(baseline, current, result.semester, stamp)
+        events = _collapse_if_bulk(events, result.semester, stamp)
 
-    added = sorted(set(current) - set(baseline))
-    removed = sorted(set(baseline) - set(current))
-    modified = [
-        {"id": cid, "name_zh": current[cid].get("name_zh"), "fields": diff}
-        for cid in sorted(set(current) & set(baseline))
-        if (diff := _diff_fields(baseline[cid], current[cid]))
-    ]
+    _append_events(out_dir, events, stamp, pretty)
 
-    if not (added or removed or modified):
-        log.info("%s 與上一輪完全相同,不記變更", result.semester)
-        return
 
-    log.info(
-        "%s 異動:新增 %d / 移除 %d / 內容變更 %d(對照上一輪索引,%d → %d 門課)",
-        result.semester,
-        len(added),
-        len(removed),
-        len(modified),
-        len(baseline),
-        len(current),
+def _course_events(
+    baseline: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    semester: str,
+    stamp: str,
+) -> list[dict[str, Any]]:
+    """加開 / 停開 / 內容變更,一門課一筆。"""
+    events: list[dict[str, Any]] = []
+
+    for cid in sorted(set(current) - set(baseline)):
+        events.append(_course_event(stamp, semester, "course_added", current[cid]))
+    for cid in sorted(set(baseline) - set(current)):
+        events.append(_course_event(stamp, semester, "course_removed", baseline[cid]))
+    for cid in sorted(set(current) & set(baseline)):
+        changed = _diff_fields(baseline[cid], current[cid])
+        if changed:
+            events.append(
+                {
+                    **_course_event(stamp, semester, "course_changed", current[cid]),
+                    "changes": changed,
+                }
+            )
+
+    return events
+
+
+def _course_event(
+    stamp: str, semester: str, kind: str, entry: dict[str, Any]
+) -> dict[str, Any]:
+    """一筆課程事件。只留認得出「是哪一門課」的欄位,細節去索引查。"""
+    return {
+        "at": stamp,
+        "semester": semester,
+        "type": kind,
+        "id": entry.get("id"),
+        "name": entry.get("name_zh"),
+        "teachers": entry.get("teachers", []),
+        "department_ids": entry.get("department_ids", []),
+        "class_ids": entry.get("class_ids", []),
+    }
+
+
+def _teacher_events(
+    baseline: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    semester: str,
+    stamp: str,
+) -> list[dict[str, Any]]:
+    """這學期多了誰、少了誰。
+
+    「少了一位老師」不等於「有課停開」—— 換人授課時課還在,只有教師端看得
+    出來;反過來合開課多掛一位老師也一樣。兩個維度都記才看得到全貌。
+    """
+    before = _teacher_index(baseline)
+    after = _teacher_index(current)
+    events: list[dict[str, Any]] = []
+
+    for key in sorted(set(after) - set(before)):
+        events.append(_teacher_event(stamp, semester, "teacher_added", after[key]))
+    for key in sorted(set(before) - set(after)):
+        events.append(_teacher_event(stamp, semester, "teacher_removed", before[key]))
+
+    return events
+
+
+def _teacher_index(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """索引項目 → 每位教師開了哪些課。
+
+    key 用**教師代碼**,和 `_write_teachers` 同一套規則 —— 115-1 實測 803 個
+    代碼只對到 801 個姓名,用姓名當 key 會把兩個同名老師併成一個人,
+    於是其中一位停開就會誤報成「這位老師消失了」。
+    """
+    teachers: dict[str, dict[str, Any]] = {}
+    for entry in entries.values():
+        names = entry.get("teachers") or []
+        codes = entry.get("teacher_codes") or []
+        for index, name in enumerate(names):
+            code = codes[index] if index < len(codes) else ""
+            key = code or f"name:{name}"
+            bucket = teachers.setdefault(
+                key,
+                {
+                    "id": code or None,
+                    "name": name,
+                    "course_count": 0,
+                    "department_ids": [],
+                },
+            )
+            bucket["course_count"] += 1
+            for dept in entry.get("department_ids") or []:
+                if dept not in bucket["department_ids"]:
+                    bucket["department_ids"].append(dept)
+    return teachers
+
+
+def _teacher_event(
+    stamp: str, semester: str, kind: str, bucket: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "at": stamp,
+        "semester": semester,
+        "type": kind,
+        "id": bucket["id"],
+        "name": bucket["name"],
+        "course_count": bucket["course_count"],
+        "department_ids": bucket["department_ids"],
+    }
+
+
+def _collapse_if_bulk(
+    events: list[dict[str, Any]], semester: str, stamp: str
+) -> list[dict[str, Any]]:
+    """一次幾百筆異動的話,折成一筆摘要。
+
+    學校端的正常異動是個位數。一口氣幾百筆通常是版面改了或抓歪了 ——
+    照實逐筆寫進去只會把先前真正的異動整個推出保留範圍,反而讓這個檔
+    在最需要它的時候失去價值。
+    """
+    if len(events) <= CHANGE_BULK_THRESHOLD:
+        return events
+
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event["type"]] = counts.get(event["type"], 0) + 1
+    log.warning(
+        "%s 一次偵測到 %d 筆異動(%s),超過 %d 筆上限,只記摘要。"
+        "這個量通常代表版面改了或抓歪了,建議人工確認。",
+        semester,
+        len(events),
+        ", ".join(f"{k} {v}" for k, v in sorted(counts.items())),
+        CHANGE_BULK_THRESHOLD,
     )
-
-    entry["previous_course_count"] = len(baseline)
-    entry["added_count"] = len(added)
-    entry["removed_count"] = len(removed)
-    entry["modified_count"] = len(modified)
-    entry["added"] = _capped([_brief(current[cid]) for cid in added])
-    entry["removed"] = _capped([_brief(baseline[cid]) for cid in removed])
-    entry["modified"] = _capped(modified)
-    _append_change(out_dir, entry, pretty)
+    return [
+        {
+            "at": stamp,
+            "semester": semester,
+            "type": "bulk_change",
+            "event_count": len(events),
+            "counts": dict(sorted(counts.items())),
+            "note": "異動量異常,未逐筆列出,請查 Actions 記錄",
+        }
+    ]
 
 
 def _previous_index_entries(
@@ -591,41 +705,43 @@ def _diff_fields(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _brief(entry: dict[str, Any]) -> dict[str, Any]:
-    """新增 / 移除的課只留認得出是哪一門的欄位,細節去索引查。"""
-    return {
-        "id": entry.get("id"),
-        "name_zh": entry.get("name_zh"),
-        "teachers": entry.get("teachers", []),
-        "department_ids": entry.get("department_ids", []),
-        "class_ids": entry.get("class_ids", []),
-    }
+def _append_events(
+    out_dir: Path, events: list[dict[str, Any]], stamp: str, pretty: bool
+) -> None:
+    """把這一輪的事件插到最前面,並砍掉超過上限的舊事件。
 
-
-def _capped(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """明細太長就截斷,並在最後補一筆說明還有多少沒列。"""
-    if len(items) <= CHANGE_DETAIL_LIMIT:
-        return items
-    return items[:CHANGE_DETAIL_LIMIT] + [
-        {"truncated": len(items) - CHANGE_DETAIL_LIMIT}
-    ]
-
-
-def _append_change(out_dir: Path, entry: dict[str, Any], pretty: bool) -> None:
-    """把一筆紀錄追加到最前面,並砍掉超過上限的舊紀錄。"""
+    `checked_at` 每次都更新,`events` 只有真的有異動才長 —— 這樣「學校沒動」
+    和「爬蟲壞了好幾天沒跑」才分得出來。
+    """
     path = Path(out_dir) / "changes.json"
     existing = _read_json(path) or {}
-    changes = [c for c in existing.get("changes", []) if isinstance(c, dict)]
-    changes.insert(0, entry)  # 最新的在最前面
-    changes = changes[:CHANGE_LOG_LIMIT]
+    kept = [e for e in existing.get("events", []) if isinstance(e, dict)]
 
+    if events:
+        summary = ", ".join(
+            f"{e['type']} {e.get('name') or e.get('id') or ''}".strip()
+            for e in events[:10]
+        )
+        log.info(
+            "偵測到 %d 筆異動:%s%s",
+            len(events),
+            summary,
+            " …" if len(events) > 10 else "",
+        )
+    else:
+        log.info("與上一輪比對後沒有任何異動")
+
+    merged = (events + kept)[:CHANGE_EVENT_LIMIT]
     _write_json(
         path,
         {
             "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
-            "change_count": len(changes),
-            "changes": changes,
+            "generated_at": stamp,
+            # 最後一次「比對過」的時間。沒有異動時 events 不會長,靠這個欄位
+            # 才分得出「學校沒動」與「爬蟲根本沒跑」。
+            "checked_at": stamp,
+            "event_count": len(merged),
+            "events": merged,
         },
         pretty,
     )
@@ -729,7 +845,7 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "{semester}/classrooms.json", "description": "教室 → 課號"},
         {"path": "{semester}/schedule.json", "description": "星期 × 節次 → 課號"},
         {"path": "errors.json", "description": "各學期抓取失敗的單位"},
-        {"path": "changes.json", "description": "最近幾次抓取偵測到的課程異動"},
+        {"path": "changes.json", "description": "最近的課程與教師異動事件"},
     ]
 
 
