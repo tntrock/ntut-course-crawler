@@ -129,6 +129,10 @@ https://tntrock.github.io/ntut-course-crawler/
 
 - **`at` 是偵測到的時間，不是學校異動的時間** —— 實際異動發生在上一次抓取
   與這次之間，最多相差 4 小時。
+- **事件是 append-only 的，寫下去就不會再改。** 所以舊事件可能缺少後來才加的
+  欄位（例如 2026-09-04 10:24 之前寫入的 `bulk_change` 沒有 `by_department` /
+  `by_class` / `samples`）。**使用端請把 `type` 以外的欄位一律當成選填**，
+  缺了就降級顯示，不要假設一定存在。
 - `checked_at` 是最後一次比對的時間，**沒有異動時也會更新**。所以
   「`checked_at` 是今天但沒有新事件」＝學校真的沒動；
   「`checked_at` 停在三天前」＝爬蟲沒在跑。
