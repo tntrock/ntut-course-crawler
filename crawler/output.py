@@ -963,11 +963,22 @@ def _previous_index_entries(
 
 
 def _diff_fields(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
-    """回傳有變動的欄位與前後值。沒變就是空 dict。"""
+    """回傳有變動的欄位與前後值。沒變就是空 dict。
+
+    **只比對兩邊都有的欄位。** 比對基準是上一輪發布的索引,而索引的欄位會
+    隨程式演進而增加 —— 新欄位第一次出現時,舊索引裡根本沒有那個 key,
+    用 `.get()` 會讀成 None,於是「從 None 變成 英語」就被當成學校改了課。
+
+    實際會發生什麼:2026-09-05 把 `language` 加進索引時,全校 499 門非中文
+    課會一次全部變成 course_changed,直接觸發一筆假的 bulk_change,把真正的
+    異動洗掉。那不是學校動了資料,是我們加了欄位。
+
+    欄位消失時同理(改了程式而不是學校改了課),一樣不報。
+    """
     return {
-        field: {"from": before.get(field), "to": after.get(field)}
+        field: {"from": before[field], "to": after[field]}
         for field in _TRACKED_FIELDS
-        if before.get(field) != after.get(field)
+        if field in before and field in after and before[field] != after[field]
     }
 
 

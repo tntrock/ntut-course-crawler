@@ -801,3 +801,77 @@ class TestIndexLanguage:
         assert len(changed) == 1
         assert changed[0]["id"] == target.id
         assert changed[0]["changes"]["language"] == {"from": None, "to": "英語"}
+
+
+class TestSchemaEvolutionIsNotAChange:
+    """加欄位不是學校改了課,不該產生異動事件。
+
+    比對基準是上一輪發布的索引。程式加了新欄位時,舊索引裡沒有那個 key ——
+    若用 .get() 讀成 None,「從 None 變成 英語」就會被當成異動。2026-09-05
+    把 language 加進索引時,全校 499 門非中文課會一次全部變成 course_changed,
+    直接觸發一筆假的 bulk_change 把真正的異動洗掉。
+    """
+
+    @pytest.fixture
+    def full(self):
+        def make():
+            result = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+            result.partial = False
+            return result
+
+        return make
+
+    def test_a_field_missing_from_the_baseline_is_not_a_change(self, tmp_path, full):
+        write_outputs(full(), tmp_path)
+
+        # 模擬「上一輪的索引還沒有 language 這個欄位」
+        path = tmp_path / "index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        for entry in index["courses"]:
+            entry.pop("language", None)
+        path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+
+        before = len(read(tmp_path / "changes.json")["events"])
+        write_outputs(full(), tmp_path)
+        after = read(tmp_path / "changes.json")["events"]
+
+        assert len(after) == before, "加欄位不該產生任何事件"
+
+    def test_a_field_dropped_from_the_index_is_not_a_change(self, tmp_path, full):
+        """欄位被拿掉也一樣是程式改了,不是學校改了課。"""
+        write_outputs(full(), tmp_path)
+        before = len(read(tmp_path / "changes.json")["events"])
+
+        result = full()
+        # 讓這一輪的索引少一個欄位
+        import crawler.output as out
+
+        original = out._index_entry
+
+        def trimmed(course, year, sem):
+            entry = original(course, year, sem)
+            entry.pop("language", None)
+            return entry
+
+        out._index_entry = trimmed
+        try:
+            write_outputs(result, tmp_path)
+        finally:
+            out._index_entry = original
+
+        assert len(read(tmp_path / "changes.json")["events"]) == before
+
+    def test_a_real_change_to_the_same_field_still_reports(self, tmp_path, full):
+        """別修過頭 —— 兩邊都有這個欄位時,真的改了還是要報。"""
+        write_outputs(full(), tmp_path)
+
+        second = full()
+        target = next(c for c in second.courses if c.language is None)
+        target.language = "英語"
+        write_outputs(second, tmp_path)
+
+        changed = [
+            e for e in read(tmp_path / "changes.json")["events"]
+            if e["type"] == "course_changed"
+        ]
+        assert [e["id"] for e in changed] == [target.id]
