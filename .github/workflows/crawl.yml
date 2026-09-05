@@ -187,7 +187,7 @@ jobs:
         run: |
           files=$(find data -type f | wc -l)
           sems=$(python -c "import json,pathlib;p=pathlib.Path('data/meta.json');print(len(json.loads(p.read_text(encoding='utf-8')).get('semesters') or []) if p.exists() else 0)")
-          echo "重建後 $files 個檔案 / $sems 個學期"\n               "(重建前 $REBUILD_BASE_FILES / $REBUILD_BASE_SEMESTERS)"
+          echo "重建後 $files 個檔案 / $sems 個學期(重建前 $REBUILD_BASE_FILES / $REBUILD_BASE_SEMESTERS)"
           if [ "$sems" -lt "$REBUILD_BASE_SEMESTERS" ]; then
             echo "::error::學期數從 $REBUILD_BASE_SEMESTERS 掉到 $sems,不發布"
             exit 1
