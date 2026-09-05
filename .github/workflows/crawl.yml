@@ -3,8 +3,16 @@ name: crawl
 on:
   schedule:
     # 每 4 小時一次(UTC 00/04/08/12/16/20 時 → 台灣 08/12/16/20/00/04 時)。
-    # Actions 的 cron 在尖峰常延遲十幾分鐘,對本專案無影響。
+    # Actions 的 cron 只保證「不早於」,實測這個 repo 常遲 2~4 小時。
+    # 對例行抓取無所謂(一天六班,漏了下一班就補),但別拿它來避開特定時段。
     - cron: '0 */4 * * *'
+    # 每月 1 號 UTC 06:00(台灣 14:00)那班改跑整包重建,見 job 層的 REBUILD。
+    # 為什麼要:平常發布走 keep_files,gh-pages 的 commit 歷史只增不減 ——
+    # 2026-09-05 實測每次發布讓 pack 多約 1.2 MB,一天八班(六次 crawl +
+    # 兩次 syllabus)就是一年 2 GB 起跳,幾個月就會頂到 GitHub 建議的 1 GB。
+    # 每月壓一次歷史,順便清掉班級 / 教師消失後留在遠端的幽靈檔。
+    # 這一天沒有 4 小時排程的班次(04:00 與 08:00 之間),不會自己撞自己。
+    - cron: '0 6 1 * *'
   workflow_dispatch:
     inputs:
       year:
@@ -27,7 +35,7 @@ on:
         type: boolean
         default: false
       rebuild:
-        description: '整包重建:撈回全部歷史資料後用 force_orphan 重發布(清幽靈檔並壓掉 gh-pages 歷史)'
+        description: '整包重建:撈回全部歷史資料後用 force_orphan 重發布(清幽靈檔並壓掉 gh-pages 歷史)。每月 1 號本來就會自動跑一次,這裡是要提前跑才勾'
         type: boolean
         default: false
 
@@ -43,8 +51,16 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    env:
+      # 手動勾選 rebuild,或每月 1 號那班排程。schedule 事件沒有 inputs,
+      # 只能靠 github.event.schedule 認出是哪一條 cron 觸發的;手動觸發時
+      # github.event.schedule 是空的,所以兩邊不會互相誤判。
+      # 值是字串 'true' / 'false',下面一律用字串比較。
+      REBUILD: ${{ inputs.rebuild || github.event.schedule == '0 6 1 * *' }}
     # Actions 單 job 上限 6 小時,留緩衝。最壞情況是三次抓取全失敗:
     # 3 × 約 15 分鐘 + 2 × 20 分鐘等待 ≈ 85 分鐘,離上限還很遠。
+    # 整包重建那班另外要 clone 整個 gh-pages(2026-09-05 實測 322 MB /
+    # 66,148 個檔)再 force push 回去,粗估多 20~40 分鐘,同樣還很寬裕。
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
@@ -65,7 +81,7 @@ jobs:
       # --sparse 只 checkout 根目錄下的檔案,正好就是這幾個;歷史學期的
       # 幾千個檔連 blob 都不會下載。發布用 keep_files,它們也不必在本機出現。
       - name: Restore shared index files
-        if: ${{ !inputs.rebuild }}
+        if: ${{ env.REBUILD != 'true' }}
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
@@ -81,18 +97,26 @@ jobs:
             echo "gh-pages 還不存在(第一次跑),從零開始"
           fi
 
-      # rebuild 模式要整包比對,才有辦法把消失的班級 / 教師留下的幽靈檔清掉
+      # rebuild 模式要整包比對,才有辦法把消失的班級 / 教師留下的幽靈檔清掉。
+      #
+      # clone 失敗**必須讓整個 job 死掉**。這一步後面接的是 force_orphan,
+      # 它會把 gh-pages 整個覆蓋掉 —— 沒撈回來就繼續跑的話,data/ 裡只剩
+      # 當期那一個學期,發布出去等於把 51 個學期的資料連同能救回來的
+      # commit 歷史一起銷毀。所以這裡不做 if/else 的「優雅降級」:
+      # 失敗就停,下個月的排程(或手動)再來一次就好。
       - name: Restore everything (rebuild)
-        if: ${{ inputs.rebuild }}
+        if: ${{ env.REBUILD == 'true' }}
         run: |
-          if git clone --depth 1 --branch gh-pages --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            mkdir -p data
-            cp -r .gh-pages/. data/
-            rm -rf data/.git
-            echo "已載回整包:$(find data -type f | wc -l) 個檔案"
-          else
-            echo "gh-pages 還不存在,rebuild 等同一般發布"
-          fi
+          git clone --depth 1 --branch gh-pages --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages
+          mkdir -p data
+          cp -r .gh-pages/. data/
+          rm -rf data/.git
+          files=$(find data -type f | wc -l)
+          sems=$(python -c "import json,pathlib;p=pathlib.Path('data/meta.json');print(len(json.loads(p.read_text(encoding='utf-8')).get('semesters') or []) if p.exists() else 0)")
+          echo "已載回整包:$files 個檔案、$sems 個學期"
+          # 留給下面的檢查步驟當基準
+          echo "REBUILD_BASE_FILES=$files" >> "$GITHUB_ENV"
+          echo "REBUILD_BASE_SEMESTERS=$sems" >> "$GITHUB_ENV"
 
       # 參數一律走環境變數,不直接把 inputs 內插進 shell —— 那是 script injection。
       #
@@ -155,10 +179,30 @@ jobs:
           path: data/
           retention-days: 7
 
+      # force_orphan 是不可逆的:推上去之後 gh-pages 的舊 commit 就沒了,
+      # 撈不回來。所以發布前再確認一次 data/ 真的是整包,而不是中途某一步
+      # 出錯之後只剩當期學期的殘骸。寧可這個月不重建,也不要發布出去。
+      - name: Verify the rebuild is a full tree
+        if: ${{ !inputs.dept && env.REBUILD == 'true' }}
+        run: |
+          files=$(find data -type f | wc -l)
+          sems=$(python -c "import json,pathlib;p=pathlib.Path('data/meta.json');print(len(json.loads(p.read_text(encoding='utf-8')).get('semesters') or []) if p.exists() else 0)")
+          echo "重建後 $files 個檔案 / $sems 個學期"\n               "(重建前 $REBUILD_BASE_FILES / $REBUILD_BASE_SEMESTERS)"
+          if [ "$sems" -lt "$REBUILD_BASE_SEMESTERS" ]; then
+            echo "::error::學期數從 $REBUILD_BASE_SEMESTERS 掉到 $sems,不發布"
+            exit 1
+          fi
+          # 當期的 courses / teachers / classes 會整批重寫,檔案數本來就會
+          # 小幅浮動,所以抓九成當門檻,不要求只增不減。
+          if [ "$files" -lt "$((REBUILD_BASE_FILES * 9 / 10))" ]; then
+            echo "::error::檔案數從 $REBUILD_BASE_FILES 掉到 $files(不到九成),不發布"
+            exit 1
+          fi
+
       # 平常只推當期的資料,歷史學期靠 keep_files 留在分支上不動。
       # 代價是班級 / 教師消失時遠端會留下幽靈檔 —— 那由 rebuild 模式清。
       - name: Publish to gh-pages
-        if: ${{ !inputs.dept && !inputs.rebuild }}
+        if: ${{ !inputs.dept && env.REBUILD != 'true' }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -167,7 +211,7 @@ jobs:
 
       # 整包重發:順便把 gh-pages 的 commit 歷史壓成一個,避免 repo 無限膨脹
       - name: Publish to gh-pages (rebuild)
-        if: ${{ !inputs.dept && inputs.rebuild }}
+        if: ${{ !inputs.dept && env.REBUILD == 'true' }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
