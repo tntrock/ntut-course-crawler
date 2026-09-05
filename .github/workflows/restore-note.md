@@ -1,6 +1,6 @@
 # 為什麼每支 workflow 都要先「還原」那幾個檔案
 
-`crawl.yml`(每 4 小時)、`syllabus.yml`(每天)與 `backfill.yml`(手動回補)
+`crawl.yml`(每 4 小時)、`syllabus.yml`(一天兩班)與 `backfill.yml`(手動回補)
 都會在抓取前，從 gh-pages 撈回 `meta.json` / `index.json` / `errors.json` /
 `changes.json` / `enrollment.json` 這幾個**跨學期**的檔案。
 `syllabus.yml` 還多撈一個 `syllabus.json`（哪些課的大綱抓過了、什麼時候抓的）。
@@ -15,7 +15,7 @@
   而且它的比對基準就是舊的 `index.json`，沒撈回來的話每次都會判成 baseline
 - `enrollment.json` 會只剩今天那一筆,人數走勢的索引等於歸零(逐日快照
   本身在學期子目錄裡,靠 `keep_files` 留著,不會掉)
-- `syllabus.json` 沒撈回來的話，每天的大綱抓取都會從頭抓 1,909 頁，
+- `syllabus.json` 沒撈回來的話，每一班的大綱抓取都會從頭抓 1,909 頁，
   而且進度顯示會歸零（大綱明細本身在學期子目錄裡，靠 `keep_files` 留著）
 - `--refresh-after` / 回補的「這學期抓過了沒」判斷失去依據，每次都重抓一遍
 
