@@ -52,6 +52,15 @@ HOME_PAGE = "course.jsp"
 #: 每 4 小時全部重抓一次只是白白增加學校的負擔。
 DEFAULT_REFRESH_AFTER = 24.0
 
+#: 每抓完一個學期,下一個學期開始前先停多久(秒)。
+#:
+#: 抓取速率本來就被「每個請求後 sleep 1 秒」鎖住了,所以這一分鐘並不會讓
+#: 學校那邊輕鬆多少。它買到的是另外兩件事:每個學期之間有一個乾淨的分界,
+#: 出事時看 log 一眼就知道斷在哪個學期;以及一個學期跑完到下一個學期的
+#: 總覽頁(format=-2,學校那邊最重的一次查詢)之間有個緩衝。
+#: 一批 10 個學期也只多 9 分鐘,相對於好幾個小時的批次可以忽略。
+DEFAULT_SEMESTER_PAUSE = 60.0
+
 #: 連續幾個學期「整個抓不到」就中止本批。
 #:
 #: 實測遇過:2026-09-03 18:00-18:18 UTC 這 18 分鐘 GitHub runner 完全連不到
@@ -567,6 +576,14 @@ def crawl_syllabi(
     return ok
 
 
+def pause_between_semesters(seconds: float) -> None:
+    """學期之間的緩衝。獨立成一個函式是為了讓測試整個換掉它,不必真的睡。"""
+    if seconds <= 0:
+        return
+    log.info("學期之間先停 %.0f 秒", seconds)
+    time.sleep(seconds)
+
+
 def _utc_now() -> str:
     return (
         datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -642,6 +659,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"教學大綱隔多久重抓一次(預設 {DEFAULT_SYLLABUS_REFRESH_AFTER:.0f} 小時)",
     )
     parser.add_argument(
+        "--semester-pause",
+        type=float,
+        default=DEFAULT_SEMESTER_PAUSE,
+        metavar="SECONDS",
+        help=f"每個學期之間停多久(預設 {DEFAULT_SEMESTER_PAUSE:.0f} 秒,0 = 不停)",
+    )
+    parser.add_argument(
         "--no-cache", action="store_true", help="略過 .cache/,強制重新抓取"
     )
     parser.add_argument(
@@ -686,7 +710,9 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[Semester] = []
     consecutive_failures = 0
 
-    for semester, reason in targets:
+    for position, (semester, reason) in enumerate(targets):
+        if position:  # 第一個學期不必等
+            pause_between_semesters(args.semester_pause)
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
         try:
             result = crawl(

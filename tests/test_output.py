@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -875,3 +876,31 @@ class TestSchemaEvolutionIsNotAChange:
             if e["type"] == "course_changed"
         ]
         assert [e["id"] for e in changed] == [target.id]
+
+
+class TestAtomicWrites:
+    """寫檔是先寫暫存檔再 rename。
+
+    發布步驟設了 always()(抓到一半也把成果推上去),所以磁碟上不可以有
+    寫到一半的 JSON —— 那會被原樣推到線上,蓋掉一份好的。
+    """
+
+    def test_no_temp_file_is_left_behind(self, out):
+        assert not list(out.rglob("*.tmp"))
+
+    def test_a_failed_write_leaves_the_old_file_intact(self, tmp_path, monkeypatch):
+        from crawler import output
+
+        path = tmp_path / "index.json"
+        output._write_json(path, {"schema_version": 3, "courses": []}, False)
+        good = path.read_bytes()
+
+        def explode(self, *args, **kwargs):
+            raise OSError("模擬:磁碟寫到一半炸掉")
+
+        monkeypatch.setattr(Path, "write_text", explode)
+        with pytest.raises(OSError):
+            output._write_json(path, {"schema_version": 3, "courses": [1]}, False)
+
+        assert path.read_bytes() == good, "舊檔必須原封不動"
+        assert not list(tmp_path.glob("*.tmp")), "失敗時也要收掉暫存檔"

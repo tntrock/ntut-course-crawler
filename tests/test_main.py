@@ -21,6 +21,9 @@ from crawler.main import (
     select_semesters,
     write_outputs,
 )
+# collection 期就綁住真正的實作 —— conftest 的 autouse fixture 會把模組上的
+# 那個名字換成 no-op,測暫停行為本身時需要繞過它。
+from crawler.main import pause_between_semesters as REAL_SEMESTER_PAUSE
 from crawler.http import SiteUnavailable
 from crawler.models import Semester
 from tests.conftest import load_fixture
@@ -654,3 +657,29 @@ class TestHalfCrawledSemesterIsNotPublished:
         assert errors["error_count"] == 1
         assert errors["errors"][0]["stage"] == "semester"
         assert "SiteUnavailable" in errors["errors"][0]["error"]
+
+
+class TestSemesterPause:
+    """學期之間的緩衝。"""
+
+    def test_it_waits_between_semesters_but_not_before_the_first(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        waited: list[float] = []
+        monkeypatch.setattr(
+            "crawler.main.pause_between_semesters", lambda seconds: waited.append(seconds)
+        )
+        # 首頁列出 115-1 與 114-2 兩個學年期,所以會抓兩個 → 中間停一次
+        main(["--out", str(tmp_path), "--log-level", "CRITICAL"])
+        assert waited == [60.0]
+
+    def test_zero_means_no_pause(self, monkeypatch):
+        # conftest 的 autouse fixture 把 crawler.main.pause_between_semesters
+        # 換成了 no-op,所以這裡要用檔案開頭就綁好的那個真貨。
+        pause_between_semesters = REAL_SEMESTER_PAUSE
+        slept: list[float] = []
+        monkeypatch.setattr("crawler.main.time.sleep", lambda s: slept.append(s))
+        pause_between_semesters(0)
+        assert slept == []
+        pause_between_semesters(60)
+        assert slept == [60]

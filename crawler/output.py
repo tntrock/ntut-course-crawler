@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 from datetime import datetime, timezone
@@ -142,12 +143,29 @@ def _clean_rebuilt_dirs(semester_dir: Path) -> None:
 # 共用小工具
 # --------------------------------------------------------------------------
 def _write_json(path: Path, payload: dict[str, Any], pretty: bool) -> None:
+    """寫一個 JSON 檔。**先寫暫存檔再 rename**,不直接覆蓋。
+
+    rename 在同一個檔案系統上是原子的,所以任何時刻這個路徑上要嘛是完整的
+    舊版、要嘛是完整的新版,不會有寫到一半的殘骸。
+
+    這不是潔癖:Actions 的 job 逾時是直接把行程砍掉的,而 index.json 有
+    1.9 MB,寫的過程中被砍掉的機率不算低。發布步驟設了 `always()`(抓到
+    一半也要把已經完成的部分推上去),沒有這個保證的話,被截斷的
+    index.json 就會直接覆蓋線上那份 —— 那是整個 API 掛掉,比少更新一輪
+    嚴重得多。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if pretty:
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False)
     else:
         text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    path.write_text(text + "\n", encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

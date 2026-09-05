@@ -165,6 +165,7 @@ jobs:
           fi
 
       - name: Add landing page
+        if: always()
         run: cp web/index.html data/index.html
 
       - name: Upload data as artifact
@@ -175,7 +176,14 @@ jobs:
           path: data/
           retention-days: 7
 
+      # always():抓到一半失敗、或 job 逾時被砍,也要把已經完成的部分推上去。
+      # 這一步是 keep_files,只會補上 data/ 裡有的檔案,沒寫出來的維持遠端原樣,
+      # 所以「半批成果」不會傷到任何東西 —— 而不推的話,跑了幾小時的成果
+      # 就只剩 artifact 裡那一份,要靠人工撈回來。
+      # 寫檔本身是先寫暫存檔再 rename(見 output.py 的 _write_json),
+      # 被砍在寫到一半也不會留下截斷的 JSON。
       - name: Publish to gh-pages
+        if: always()
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
