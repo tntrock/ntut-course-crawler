@@ -69,7 +69,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json; do
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"
@@ -135,7 +135,8 @@ jobs:
           fi
 
           args=(--out data/ --years "$YEARS" --delay "$DELAY"
-                --max-semesters "$MAX_SEMESTERS")
+                --max-semesters "$MAX_SEMESTERS"
+                --run-summary "$RUNNER_TEMP/run-summary.json")
           if [ "$ALL_SEMESTERS" = "true" ]; then
             args+=(--all-semesters)
           fi
@@ -153,6 +154,22 @@ jobs:
             sleep "$RETRY_WAIT_SECONDS"
             attempt=$((attempt + 1))
           done
+
+
+      # 不論成功、失敗、還是 job 逾時被砍,都留下一筆執行紀錄。
+      #
+      # Actions 自己的 log 是給人看的:要登入點進去或帶 token 打 API,而且
+      # 只留 90 天。狀態頁需要的是一份跟資料放在一起、直接 fetch 就拿得到的
+      # 紀錄 —— 那就是 runs.json。
+      #
+      # 狀態從 job.status 拿而不是由爬蟲自己寫,因為最需要紀錄的那幾次
+      # (逾時被砍、整批重試用完)爬蟲根本沒機會寫任何東西。
+      - name: Record this run
+        if: always()
+        run: |
+          python -m crawler.runlog --out data/ \
+            --status "${{ job.status }}" \
+            --summary "$RUNNER_TEMP/run-summary.json"
 
       # 首頁。gh-pages 根目錄沒有 index.html 的話,GitHub Pages 會退而直接把
       # 1.5 MB 的 index.json 吐給訪客 —— 那不是給人看的東西。

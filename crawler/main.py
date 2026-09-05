@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -51,15 +52,6 @@ HOME_PAGE = "course.jsp"
 #: 非最新學期預設多久重抓一次(小時)。過去的學期資料幾乎不再變動,
 #: 每 4 小時全部重抓一次只是白白增加學校的負擔。
 DEFAULT_REFRESH_AFTER = 24.0
-
-#: 每抓完一個學期,下一個學期開始前先停多久(秒)。
-#:
-#: 抓取速率本來就被「每個請求後 sleep 1 秒」鎖住了,所以這一分鐘並不會讓
-#: 學校那邊輕鬆多少。它買到的是另外兩件事:每個學期之間有一個乾淨的分界,
-#: 出事時看 log 一眼就知道斷在哪個學期;以及一個學期跑完到下一個學期的
-#: 總覽頁(format=-2,學校那邊最重的一次查詢)之間有個緩衝。
-#: 一批 10 個學期也只多 9 分鐘,相對於好幾個小時的批次可以忽略。
-DEFAULT_SEMESTER_PAUSE = 60.0
 
 #: 連續幾個學期「整個抓不到」就中止本批。
 #:
@@ -110,6 +102,8 @@ class CrawlResult:
     # 只會誤導。刻意不用「是不是最新學期」來判斷:學校可能在學期還沒結束時
     # 就把下一個學期掛上首頁,那樣會讓當期的人數快照在期中無聲停掉。
     backfill: bool = False
+    syllabus_fetched: int = 0  # 這次抓了幾門課的大綱
+    syllabus_written: int = 0  # 其中幾門內容真的變了、重寫了檔案
     elapsed: float = 0.0
 
     @property
@@ -567,6 +561,8 @@ def crawl_syllabi(
     write_syllabus_index(
         out_dir, state, totals, frozen=newly_frozen, pretty=pretty
     )
+    result.syllabus_fetched = ok
+    result.syllabus_written = written
     log.info(
         "%s 教學大綱本次抓了 %d 門,其中 %d 門內容有變動而重寫",
         result.semester,
@@ -576,12 +572,55 @@ def crawl_syllabi(
     return ok
 
 
-def pause_between_semesters(seconds: float) -> None:
-    """學期之間的緩衝。獨立成一個函式是為了讓測試整個換掉它,不必真的睡。"""
-    if seconds <= 0:
+def write_run_summary(
+    path: Path | None,
+    started_at: str,
+    results: list[CrawlResult],
+    failed: list[Semester],
+    fetcher: Fetcher,
+    *,
+    exit_code: int | None = None,
+) -> None:
+    """把「這次跑了什麼」寫成一個小側寫檔,給 `crawler.runlog` 撿走。
+
+    **每抓完一個學期就重寫一次**,不是等整批結束才寫。job 逾時是直接把
+    行程砍掉的,等到最後才寫等於最需要紀錄的那幾次剛好什麼都沒有。
+
+    寫失敗絕對不能影響抓取 —— 這只是紀錄,不是資料。所以整段包在
+    try/except 裡,壞了就吞掉。
+    """
+    if path is None:
         return
-    log.info("學期之間先停 %.0f 秒", seconds)
-    time.sleep(seconds)
+    payload = {
+        "started_at": started_at,
+        "requests": fetcher.request_count,
+        "cache_hits": fetcher.cache_hit_count,
+        "semesters": [
+            {
+                "semester": r.semester,
+                "courses": len(r.courses),
+                "departments_ok": r.ok_departments,
+                "departments_failed": r.failed_departments,
+                "errors": len(r.errors),
+                "seconds": round(r.elapsed, 1),
+                "syllabus_fetched": r.syllabus_fetched,
+                "syllabus_written": r.syllabus_written,
+            }
+            for r in results
+        ],
+        "failed_semesters": [s.path for s in failed],
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("寫不出執行側寫檔 %s:%s(不影響抓取)", path, exc)
 
 
 def _utc_now() -> str:
@@ -659,11 +698,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"教學大綱隔多久重抓一次(預設 {DEFAULT_SYLLABUS_REFRESH_AFTER:.0f} 小時)",
     )
     parser.add_argument(
-        "--semester-pause",
-        type=float,
-        default=DEFAULT_SEMESTER_PAUSE,
-        metavar="SECONDS",
-        help=f"每個學期之間停多久(預設 {DEFAULT_SEMESTER_PAUSE:.0f} 秒,0 = 不停)",
+        "--run-summary",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="把這次跑了什麼寫成側寫檔(給 crawler.runlog 記進 runs.json)",
     )
     parser.add_argument(
         "--no-cache", action="store_true", help="略過 .cache/,強制重新抓取"
@@ -693,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
 
+    started_at = _utc_now()
     fetcher = Fetcher(delay=args.delay, use_cache=not args.no_cache)
     log.info("延遲 %.2fs / 快取 %s", fetcher.delay, "關閉" if args.no_cache else "開啟")
 
@@ -710,9 +750,12 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[Semester] = []
     consecutive_failures = 0
 
-    for position, (semester, reason) in enumerate(targets):
-        if position:  # 第一個學期不必等
-            pause_between_semesters(args.semester_pause)
+    def snapshot(exit_code: int | None = None) -> None:
+        write_run_summary(
+            args.run_summary, started_at, results, failed, fetcher, exit_code=exit_code
+        )
+
+    for semester, reason in targets:
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
         try:
             result = crawl(
@@ -728,6 +771,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.out, semester.year, semester.sem, exc, pretty=args.pretty
             )
             failed.append(semester)
+            snapshot()
 
             consecutive_failures += 1
             if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
@@ -765,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
                 # 大綱抓完可能新增了錯誤,重寫一次 errors.json
                 write_outputs(result, args.out, pretty=args.pretty)
 
+        snapshot()
+
     _print_summary(results, fetcher, args.out)
 
     if failed:
@@ -778,12 +824,15 @@ def main(argv: list[str] | None = None) -> int:
     for result in results:
         if result.departments and result.ok_departments == 0:
             log.error("%s 的所有單位都抓取失敗", result.semester)
+            snapshot(1)
             return 1
 
     # 一個學期都沒抓成功才算整體失敗;有部分成果就要讓它發布出去
     if failed and not results:
         log.error("所有指定的學期都抓取失敗")
+        snapshot(1)
         return 1
+    snapshot(0)
     return 0
 
 

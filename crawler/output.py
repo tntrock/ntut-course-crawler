@@ -1286,6 +1286,7 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "{semester}/classrooms.json", "description": "教室 → 課號"},
         {"path": "{semester}/schedule.json", "description": "星期 × 節次 → 課號"},
         {"path": "errors.json", "description": "各學期抓取失敗的單位"},
+        {"path": "runs.json", "description": "最近的抓取執行紀錄(含失敗與逾時)"},
         {"path": "changes.json", "description": "最近的課程與教師異動事件"},
         {"path": "enrollment.json", "description": "修課 / 撤選人數快照的索引"},
         {"path": "syllabus.json", "description": "教學大綱的抓取進度"},

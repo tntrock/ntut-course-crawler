@@ -56,6 +56,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `meta.json` | 學年期清單、端點清單、節次與必選修對照 | 13 KB |
 | `index.json` | **最新兩個學期**的課程輕量索引 | 1.5 MB（gzip 149 KB）|
 | `errors.json` | 各學期抓取失敗的單位（目前 51 個學期全部為空） | < 1 KB |
+| `runs.json` | 最近 120 次抓取的執行紀錄，含失敗與逾時（見下） | 約 50 KB |
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
 | `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 120 KB / 天 |
@@ -232,6 +233,64 @@ https://tntrock.github.io/ntut-course-crawler/
 > **人數的變動刻意不進 `changes.json`。** 加退選期間每 4 小時就有上千門課的
 > 人數在動，塞進事件流會每次都觸發 `bulk_change`，把真正的結構性異動
 > （加開、停開、調課、換老師）整個淹掉 —— 兩種資料的變動頻率差一個數量級。
+
+### 執行紀錄 `runs.json`
+
+「爬蟲現在怎麼樣了」這件事，**GitHub Actions 的 log 回答不了**——它要登入點進去
+或帶 token 打 API，而且只留 90 天。一個靜態的狀態頁需要的是一份跟資料放在
+一起、直接 `fetch()` 就拿得到的紀錄。這個檔就是。
+
+```json
+{
+  "schema_version": 3,
+  "generated_at": "2026-09-05T12:31:07Z",
+  "run_count": 47,
+  "runs": [
+    {
+      "at": "2026-09-05T12:31:07Z",
+      "workflow": "backfill",
+      "status": "success",
+      "event": "workflow_dispatch",
+      "run_id": "33959063005",
+      "attempt": 1,
+      "url": "https://github.com/tntrock/ntut-course-crawler/actions/runs/33959063005",
+      "detail": true,
+      "started_at": "2026-09-05T09:51:02Z",
+      "requests": 7100,
+      "cache_hits": 0,
+      "exit_code": 0,
+      "semesters": [
+        {"semester": "114-2", "courses": 2809, "departments_ok": 61,
+         "departments_failed": 0, "errors": 0, "seconds": 524.8,
+         "syllabus_fetched": 1968, "syllabus_written": 1968}
+      ],
+      "failed_semesters": []
+    }
+  ]
+}
+```
+
+- **最新的在最前面**，保留最近 120 筆（一天八班約兩週）
+- `status` 是 **job 的狀態**，不是爬蟲的回傳值：`success` / `failure` / `cancelled`
+  （job 逾時被砍算 `cancelled`）
+- `detail: false` 代表爬蟲**沒能寫出側寫檔**——被砍在半路，或更早的步驟就失敗了。
+  這時 `semesters` 等欄位整組不存在。刻意不填 0，那會被讀成
+  「跑了但什麼都沒抓到」，跟「根本沒跑到」是兩回事
+- 同一個 `run_id` + `attempt` 只會有一筆；重試是新的 `attempt`，各自一筆
+
+寫這個檔的是 workflow 的 `Record this run` 步驟，設了 `always()`，
+**不論成功、失敗、還是逾時被砍都會留下一筆**。狀態從 `job.status` 拿而不是
+由爬蟲自己寫，因為最需要留下紀錄的那幾次（逾時被砍、整批重試用完）
+爬蟲根本沒機會寫任何東西。
+
+爬蟲自己知道的細節走 `--run-summary` 寫成一個側寫檔，**每抓完一個學期就重寫
+一次**，然後由 `python -m crawler.runlog` 併進 `runs.json`。側寫檔不存在也照樣
+記一筆，只是細節從缺。
+
+> 要做狀態頁的話，這幾個檔合起來就夠了：`runs.json`（最近跑得如何）、
+> `meta.json` 的 `semesters[].generated_at`（每個學期的資料多新）、
+> `errors.json`（現在有哪些單位抓不到）、`syllabus.json`（大綱補到哪了）。
+> 全部都是 CORS 開放的靜態 JSON，前端直接 `fetch()`。
 
 ### 教學大綱
 
@@ -980,7 +1039,7 @@ python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 | `--with-syllabus` | 順便抓教學大綱（一門課一頁，很慢，預設關閉） |
 | `--max-syllabus N` | 這次最多抓幾頁大綱，預設 `0` = 不限（全校一輪約 38 分鐘） |
 | `--syllabus-refresh-after H` | 同一門課的大綱隔多久重抓，預設 `6` 小時（配合一天兩班各全跑一輪）。**只對最新學期有效**，歷史學期一律只補沒抓過的 |
-| `--semester-pause S` | 每個學期之間停多久，預設 `60` 秒（`0` = 不停） |
+| `--run-summary PATH` | 把這次跑了什麼寫成側寫檔，給 `crawler.runlog` 記進 `runs.json` |
 | `--log-level` | 記錄層級，預設 `INFO`。抓不到東西時開 `DEBUG` 看實際打了哪些 URL |
 
 ### 測試
@@ -1096,16 +1155,6 @@ runner 在美國，跨太平洋連學校主機，偶爾會整段路由抖掉。2
 > 那條路徑上的兩道保險（撈回整包失敗就整個停手、發布前驗學期數與檔案數）
 > 只有在前面每一步都成功時才成立。
 
-#### 學期之間停一分鐘
-
-`--semester-pause`，預設 **60 秒**。
-
-老實說這一分鐘對學校的負擔幾乎沒有影響 —— 抓取速率早就被「每個請求後
-sleep 1 秒」鎖死了。它買到的是另外兩件事：每個學期之間有一個乾淨的分界，
-出事時看 log 一眼就知道斷在哪個學期；以及一個學期跑完到下一個學期的總覽頁
-（`format=-2`，學校那邊最重的一次查詢）之間有個緩衝。
-一批 10 個學期也只多 9 分鐘，相對於好幾個小時的批次可以忽略。
-
 ### 架構
 
 ```
@@ -1120,6 +1169,7 @@ crawler/
   parse_course.py   # 解析 format=-4(純函式,不連網)
   output.py         # 把 CrawlResult 寫成各維度的 JSON
   main.py           # CLI:選學期、抓取流程、去重
+  runlog.py         # CLI:把一次 workflow 執行的結果記進 runs.json
 
 tests/              # 全離線,對 tests/fixtures/ 的真實 HTML 樣本斷言
 scripts/            # 一次性的偵察腳本(recon*.py),不參與正式流程,

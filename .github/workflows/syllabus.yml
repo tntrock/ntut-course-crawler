@@ -89,7 +89,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json; do
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"
@@ -126,7 +126,8 @@ jobs:
 
           args=(--out data/ --delay "$DELAY" --with-syllabus
                 --max-syllabus "$MAX_SYLLABUS"
-                --syllabus-refresh-after "$SYLLABUS_REFRESH_AFTER")
+                --syllabus-refresh-after "$SYLLABUS_REFRESH_AFTER"
+                --run-summary "$RUNNER_TEMP/run-summary.json")
           if [ -n "$YEAR" ]; then
             args+=(--year "$YEAR" --sem "$SEM")
           fi
@@ -163,6 +164,22 @@ jobs:
           else
             echo "尚無教學大綱資料"
           fi
+
+
+      # 不論成功、失敗、還是 job 逾時被砍,都留下一筆執行紀錄。
+      #
+      # Actions 自己的 log 是給人看的:要登入點進去或帶 token 打 API,而且
+      # 只留 90 天。狀態頁需要的是一份跟資料放在一起、直接 fetch 就拿得到的
+      # 紀錄 —— 那就是 runs.json。
+      #
+      # 狀態從 job.status 拿而不是由爬蟲自己寫,因為最需要紀錄的那幾次
+      # (逾時被砍、整批重試用完)爬蟲根本沒機會寫任何東西。
+      - name: Record this run
+        if: always()
+        run: |
+          python -m crawler.runlog --out data/ \
+            --status "${{ job.status }}" \
+            --summary "$RUNNER_TEMP/run-summary.json"
 
       - name: Add landing page
         if: always()

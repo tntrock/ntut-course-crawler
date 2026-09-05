@@ -39,14 +39,3 @@ def no_real_network(monkeypatch):
         )
 
     monkeypatch.setattr(requests.Session, "request", blocked)
-
-
-@pytest.fixture(autouse=True)
-def no_semester_pause(monkeypatch):
-    """測試不要真的在學期之間睡一分鐘。
-
-    正式預設值就是 60 秒(見 `DEFAULT_SEMESTER_PAUSE`),不為了測試而調低 ——
-    那會讓「測試裡跑的」和「線上跑的」不是同一組參數。改成在這裡整個換掉,
-    要驗暫停行為的測試自己去呼叫 `pause_between_semesters`。
-    """
-    monkeypatch.setattr("crawler.main.pause_between_semesters", lambda seconds: None)
