@@ -47,6 +47,7 @@ def build_record(
     event: str,
     repository: str,
     server_url: str,
+    attempts: str,
     summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """組一筆執行紀錄。`summary` 是 None 代表爬蟲沒能寫出側寫檔。"""
@@ -57,6 +58,9 @@ def build_record(
         "event": event or None,
         "run_id": run_id or None,
         "attempt": int(attempt) if str(attempt).isdigit() else None,
+        # workflow 的整批重試跑了幾次(不是 GitHub 的 re-run)。
+        # 「成功但重試了 3 次」跟「一次就過」對狀態頁是兩回事。
+        "attempts": int(attempts) if str(attempts).isdigit() else None,
     }
     if run_id and repository and server_url:
         record["url"] = f"{server_url}/{repository}/actions/runs/{run_id}"
@@ -68,8 +72,9 @@ def build_record(
         return record
 
     record["detail"] = True
-    record["started_at"] = summary.get("started_at")
-    record["requests"] = summary.get("requests")
+    record["attempt_started_at"] = summary.get("attempt_started_at")
+    record["requests_ok"] = summary.get("requests_ok")
+    record["failed_urls"] = summary.get("failed_urls")
     record["cache_hits"] = summary.get("cache_hits")
     record["semesters"] = summary.get("semesters") or []
     record["failed_semesters"] = summary.get("failed_semesters") or []
@@ -124,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--repository", default=os.environ.get("GITHUB_REPOSITORY", "")
     )
     parser.add_argument(
+        "--attempts",
+        default=os.environ.get("CRAWL_ATTEMPTS", ""),
+        help="workflow 的整批重試跑了幾次(由抓取步驟寫進 GITHUB_ENV)",
+    )
+    parser.add_argument(
         "--server-url", default=os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     )
     parser.add_argument("--pretty", action="store_true")
@@ -150,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         event=args.event,
         repository=args.repository,
         server_url=args.server_url,
+        attempts=args.attempts,
         summary=summary,
     )
     append_run(args.out, record, pretty=args.pretty)

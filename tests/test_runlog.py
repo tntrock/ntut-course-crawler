@@ -30,6 +30,7 @@ def record(**kwargs):
         event="schedule",
         repository="tntrock/ntut-course-crawler",
         server_url="https://github.com",
+        attempts="1",
         summary=None,
     )
     base.update(kwargs)
@@ -60,8 +61,9 @@ class TestBuildRecord:
     def test_a_summary_is_carried_through(self):
         r = record(
             summary={
-                "started_at": "2026-09-05T00:00:00Z",
-                "requests": 355,
+                "attempt_started_at": "2026-09-05T00:00:00Z",
+                "requests_ok": 355,
+                "failed_urls": 0,
                 "cache_hits": 2,
                 "semesters": [{"semester": "115-1", "courses": 2717}],
                 "failed_semesters": ["114-2"],
@@ -69,7 +71,8 @@ class TestBuildRecord:
             }
         )
         assert r["detail"] is True
-        assert r["requests"] == 355
+        assert r["requests_ok"] == 355
+        assert r["failed_urls"] == 0
         assert r["semesters"][0]["semester"] == "115-1"
         assert r["failed_semesters"] == ["114-2"]
         assert r["exit_code"] == 0
@@ -141,7 +144,8 @@ class TestCrawlerWritesItsSummary:
 
         data = read(summary)
         assert data["exit_code"] == 0
-        assert data["requests"] > 0
+        assert data["requests_ok"] > 0
+        assert data["failed_urls"] == 0
         assert [s["semester"] for s in data["semesters"]] == ["115-1"]
         assert data["semesters"][0]["courses"] > 0
         assert data["failed_semesters"] == []
@@ -185,3 +189,12 @@ class TestCrawlerWritesItsSummary:
             "--log-level", "CRITICAL",
         ])
         assert not list(tmp_path.glob("*.json"))
+
+
+class TestAttempts:
+    def test_the_batch_retry_count_is_recorded(self):
+        """「一次就過」跟「重試三次才過」對狀態頁是兩回事。"""
+        assert record(attempts="3")["attempts"] == 3
+
+    def test_a_missing_count_is_null_not_zero(self):
+        assert record(attempts="")["attempts"] is None

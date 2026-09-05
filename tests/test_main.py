@@ -46,6 +46,7 @@ class FakeFetcher:
         self.no_syllabus: set[str] = set()
         self.calls: list[tuple[int, str | None]] = []
         self.request_count = 0
+        self.failed_url_count = 0
         self.cache_hit_count = 0
         self.delay = 1.0
 

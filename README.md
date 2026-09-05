@@ -254,9 +254,11 @@ https://tntrock.github.io/ntut-course-crawler/
       "run_id": "33959063005",
       "attempt": 1,
       "url": "https://github.com/tntrock/ntut-course-crawler/actions/runs/33959063005",
+      "attempts": 1,
       "detail": true,
-      "started_at": "2026-09-05T09:51:02Z",
-      "requests": 7100,
+      "attempt_started_at": "2026-09-05T09:51:02Z",
+      "requests_ok": 7100,
+      "failed_urls": 0,
       "cache_hits": 0,
       "exit_code": 0,
       "semesters": [
@@ -277,6 +279,14 @@ https://tntrock.github.io/ntut-course-crawler/
   這時 `semesters` 等欄位整組不存在。刻意不填 0，那會被讀成
   「跑了但什麼都沒抓到」，跟「根本沒跑到」是兩回事
 - 同一個 `run_id` + `attempt` 只會有一筆；重試是新的 `attempt`，各自一筆
+- 兩種「重試」不要搞混：`attempt` 是 GitHub 的 re-run 按鈕，
+  `attempts` 是 workflow 內部那個「等 30 分鐘整批重來」的迴圈跑了幾次。
+  「一次就過」跟「重試三次才過」對狀態頁是兩回事
+- `requests_ok` **只算成功的請求**，要跟 `failed_urls`（重試到底仍然放棄的網址數）
+  一起看。2026-09-05 那次回補失敗就是 `requests_ok: 0` 配 `failed_urls: 3` ——
+  連學校的門都沒摸到
+- `attempt_started_at` 是**最後那一次嘗試**的開始時間。整批重試每次都重跑一個
+  新的行程、重寫側寫檔，所以它不等於整個 run 的開始時間（那個看 `url` 進去查）
 
 寫這個檔的是 workflow 的 `Record this run` 步驟，設了 `always()`，
 **不論成功、失敗、還是逾時被砍都會留下一筆**。狀態從 `job.status` 拿而不是

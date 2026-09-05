@@ -592,8 +592,13 @@ def write_run_summary(
     if path is None:
         return
     payload = {
-        "started_at": started_at,
-        "requests": fetcher.request_count,
+        # 這是**這一次嘗試**的開始時間。workflow 的整批重試每次都會重跑一個新的
+        # Python 行程、重寫這個檔,所以它不等於整個 run 的開始時間。
+        "attempt_started_at": started_at,
+        # 只算成功的請求。跟 failed_urls 一起看才分得出「沒跑」和「跑了但全連不上」——
+        # 2026-09-05 那次回補就是 requests_ok=0 而 failed_urls=3。
+        "requests_ok": fetcher.request_count,
+        "failed_urls": fetcher.failed_url_count,
         "cache_hits": fetcher.cache_hit_count,
         "semesters": [
             {

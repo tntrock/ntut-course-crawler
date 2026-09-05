@@ -136,12 +136,17 @@ jobs:
           until python -m crawler.main "${args[@]}"; do
             if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
               echo "::error::連續 $attempt 次失敗,放棄本次執行(下一班排程會接續)"
+              echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
               exit 1
             fi
             echo "::warning::第 $attempt 次失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
             sleep "$RETRY_WAIT_SECONDS"
             attempt=$((attempt + 1))
           done
+
+          # 給 Record this run 用:「一次就過」和「重試三次才過」對狀態頁
+          # 是兩回事。放棄的那條路徑在上面也寫了一次。
+          echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
 
       - name: Show progress
         if: always()

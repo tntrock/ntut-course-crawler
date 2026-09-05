@@ -165,6 +165,9 @@ class Fetcher:
         self.session.headers["User-Agent"] = USER_AGENT
         # 統計,給結束摘要用
         self.request_count = 0
+        #: 重試到底仍然失敗、只好放棄的網址數。request_count 只算成功的,
+        #: 兩個一起看才分得出「沒跑」和「跑了但全都連不上」。
+        self.failed_url_count = 0
         self.cache_hit_count = 0
         # 斷路器:連續幾個網址重試到底仍然失敗、以及是否已經判定站台不可用
         self.consecutive_failures = 0
@@ -257,6 +260,7 @@ class Fetcher:
 
         只有連線層級的失敗算數。4xx 走不到這裡 —— 那代表對方其實是活的。
         """
+        self.failed_url_count += 1
         self.consecutive_failures += 1
         log.error(
             "重試 %d 次仍然失敗(第 %d 個連續失敗的網址):%s —— %s",
