@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>北科課程資料 靜態 API</title>
+<meta name="description" content="國立臺北科技大學課程資料的非官方靜態 JSON API,涵蓋 90 學年度至今。">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b675f; --line: #e3ded4;
+    --card: #ffffff; --accent: #8a5a2b; --code-bg: #f2efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171614; --fg: #eae7e1; --muted: #9c968a; --line: #33302b;
+      --card: #201e1b; --accent: #d9a066; --code-bg: #262320;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.7 system-ui, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  }
+  main { max-width: 52rem; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin: 0 0 .3rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.1rem; margin: 2.5rem 0 .75rem; }
+  p { margin: .5rem 0; }
+  .lede { color: var(--muted); margin-bottom: 1.5rem; }
+  a { color: var(--accent); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; font-size: .89em; }
+  pre {
+    background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px;
+    overflow-x: auto; font-size: .85rem; line-height: 1.6;
+  }
+  pre code { background: none; padding: 0; }
+  .note {
+    border-left: 3px solid var(--accent); background: var(--card);
+    padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
+    font-size: .93rem;
+  }
+  .stats { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+  .stat {
+    flex: 1 1 8rem; background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: .8rem 1rem;
+  }
+  .stat b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: .8rem; }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .82rem; }
+  td:first-child { white-space: nowrap; }
+  footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .87rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>北科課程資料 靜態 API</h1>
+<p class="lede">
+  國立臺北科技大學課程資料的<strong>非官方</strong>靜態 JSON API。
+  課程與人數每 4 小時自動更新、教學大綱一天兩次,沒有伺服器、不需要 API key,
+  瀏覽器直接 <code>fetch()</code> 就能用。
+</p>
+
+<div class="stats" id="stats" hidden>
+  <div class="stat"><b id="s-sem">—</b><span>個學期</span></div>
+  <div class="stat"><b id="s-course">—</b><span>門課程</span></div>
+  <div class="stat"><b id="s-range">—</b><span>涵蓋範圍</span></div>
+  <div class="stat"><b id="s-time">—</b><span>最後更新 (UTC+8)</span></div>
+</div>
+
+<h2>馬上試</h2>
+<pre><code>// 目前最新的學年期
+const meta = await (await fetch("https://tntrock.github.io/ntut-course-crawler/meta.json")).json();
+
+// 資工系這學期開的課
+const url = `https://tntrock.github.io/ntut-course-crawler/${meta.latest}/courses/59.json`;
+const dept = await (await fetch(url)).json();
+console.log(dept.course_count, dept.courses[0].name_zh);</code></pre>
+
+<div class="note">
+  <strong>不要把學年期寫死。</strong>讀 <code>meta.json</code> 的 <code>latest</code>,
+  115-2、116-1 之後才不用改你的程式。
+</div>
+
+<h2>端點</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>路徑</th><th>內容</th><th>看看</th></tr></thead>
+  <tbody>
+    <tr><td><code>meta.json</code></td><td>學年期清單、端點清單、節次與必選修對照</td><td><a href="meta.json">開啟</a></td></tr>
+    <tr><td><code>index.json</code></td><td>最新兩個學期的輕量索引(約 1.5 MB)</td><td><a href="index.json">開啟</a></td></tr>
+    <tr><td><code>{semester}/index.json</code></td><td>單一學期的輕量索引</td><td><a href="115-1/index.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/departments.json</code></td><td>學院 / 系所 / 班級三層對照</td><td><a href="115-1/departments.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/courses/{系所代碼}.json</code></td><td>系所課表(完整課程物件)</td><td><a href="115-1/courses/59.json">資工系</a></td></tr>
+    <tr><td><code>{semester}/teachers.json</code></td><td>教師清單</td><td><a href="115-1/teachers.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/teachers/{教師代碼}.json</code></td><td>教師課表</td><td><a href="115-1/teachers/12095.json">範例</a></td></tr>
+    <tr><td><code>{semester}/classes.json</code></td><td>班級清單</td><td><a href="115-1/classes.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/classes/{班級代碼}.json</code></td><td>班級課表</td><td><a href="115-1/classes/2915.json">資工四</a></td></tr>
+    <tr><td><code>{semester}/programs.json</code></td><td>學程 → 課號</td><td><a href="115-1/programs.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/classrooms.json</code></td><td>教室 → 課號</td><td><a href="115-1/classrooms.json">115-1</a></td></tr>
+    <tr><td><code>{semester}/schedule.json</code></td><td>星期 × 節次 → 課號</td><td><a href="115-1/schedule.json">115-1</a></td></tr>
+    <tr><td><code>errors.json</code></td><td>各學期抓取失敗的單位</td><td><a href="errors.json">開啟</a></td></tr>
+    <tr><td><code>changes.json</code></td><td>最近的課程與教師異動事件</td><td><a href="changes.json">開啟</a></td></tr>
+    <tr><td><code>enrollment.json</code></td><td>修課 / 撤選人數逐日快照的索引</td><td><a href="enrollment.json">開啟</a></td></tr>
+    <tr><td><code>{semester}/syllabus/{課號}.json</code></td><td>單一課程的教學大綱與進度</td><td><a href="115-1/syllabus/364893.json">範例</a></td></tr>
+    <tr><td><code>syllabus.json</code></td><td>教學大綱的抓取進度</td><td><a href="syllabus.json">開啟</a></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p style="margin-top:1.25rem">
+  欄位說明、系所代碼對照表、<code>schema_version</code> 相容性承諾都在
+  <a href="https://github.com/tntrock/ntut-course-crawler#readme">README</a>。
+</p>
+
+<h2>免責聲明</h2>
+<p>
+  本專案為<strong>非官方</strong>個人專案,與國立臺北科技大學無隸屬關係。
+  資料以自動化方式蒐集自
+  <a href="https://aps.ntut.edu.tw/course/tw/course.jsp">北科大課程查詢系統</a>,
+  可能因學校改版、網路異常或解析錯誤而不完整或過時。
+</p>
+<p>
+  <strong>選課、抵免、畢業學分等一切事項請以學校公告與課程系統當下顯示的內容為準。</strong>
+  若校方認為本專案造成困擾,請
+  <a href="https://github.com/tntrock/ntut-course-crawler/issues">開 issue</a> 告知,會立即停止。
+</p>
+
+<footer>
+  程式碼採 MIT License。資料著作權屬國立臺北科技大學,本專案僅為格式轉換與再發布。 ·
+  <a href="https://github.com/tntrock/ntut-course-crawler">原始碼</a>
+</footer>
+
+</main>
+
+<script>
+// generated_at 是 UTC(結尾的 Z),顯示時換成台灣時間。
+function taipei(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "—";
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(d).replace(/\//g, "-");
+}
+
+(async () => {
+  try {
+    const meta = await (await fetch("meta.json", { cache: "no-cache" })).json();
+    const sems = meta.semesters || [];
+    if (!sems.length) return;
+    const paths = sems.map(s => s.path);
+    const total = sems.reduce((n, s) => n + (s.course_count || 0), 0);
+    document.getElementById("s-sem").textContent = sems.length;
+    document.getElementById("s-course").textContent = total.toLocaleString("en-US");
+    document.getElementById("s-range").textContent =
+      paths[paths.length - 1] + " → " + meta.latest;
+    document.getElementById("s-time").textContent = taipei(meta.generated_at);
+    document.getElementById("stats").hidden = false;
+  } catch (e) {
+    /* 統計拿不到就不顯示,頁面其餘部分照常 */
+  }
+})();
+</script>
+</body>
+</html>
