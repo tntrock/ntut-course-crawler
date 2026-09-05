@@ -25,7 +25,13 @@ BASE_URL = "https://aps.ntut.edu.tw/course/tw/"
 #:      導致每次跑完所有檔案內容都變,發布時等於整包重推。
 #:   2. 頂層 index.json 只涵蓋最新 INDEX_SEMESTERS 個學期,更舊的查
 #:      `{semester}/index.json`。50 個學期全塞進去會膨脹到數十 MB。
-SCHEMA_VERSION = 2
+#:
+#: v3(2026-09-05):把 v2 沒做完的那半件事做完。v2 拿掉了各檔的 `generated_at`,
+#:   卻漏了教學大綱的 `fetched_at` —— 它一樣是每次抓取都變的時間戳,於是
+#:   一天兩班、每班 1,909 份大綱,即使一個字都沒改也會產生 1,909 個新 blob。
+#:   現在大綱檔不再帶 `fetched_at`,改帶 `content_hash`;抓取時間收進根目錄的
+#:   `syllabus.json`,內容沒變就整個不重寫那個檔。
+SCHEMA_VERSION = 3
 
 #: 頂層 index.json 涵蓋幾個最新的學期。歷史學期一律走 `{semester}/index.json`。
 INDEX_SEMESTERS = 2

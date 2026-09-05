@@ -175,7 +175,7 @@ class TestCrawlSyllabi:
         crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
 
         state = read_syllabus_state(tmp_path)
-        state["114-2"] = {"999999": "2026-09-05T00:00:00Z"}
+        state["114-2"] = {"999999": {"at": "2026-09-05T00:00:00Z", "hash": "abc"}}
         write_syllabus_index(
             tmp_path, state, {"114-2": {"course_count": 2809, "with_url": 1800}}
         )
@@ -264,3 +264,225 @@ class TestSyllabusCli:
         main(["--year", "115", "--sem", "1", "--out", str(tmp_path), "--dept", "59",
               "--with-syllabus", "--log-level", "CRITICAL"])
         assert not (tmp_path / "syllabus.json").exists()
+
+
+# --------------------------------------------------------------------------
+# v3:內容雜湊與歷史學期的收合
+# --------------------------------------------------------------------------
+def seed_meta(tmp_path, *semesters):
+    """寫一份最小的 meta.json,決定「哪個學期是最新的」。"""
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            {
+                "semesters": [
+                    {
+                        "year": y,
+                        "sem": s,
+                        "path": f"{y}-{s}",
+                        "generated_at": "2026-09-05T00:00:00Z",
+                    }
+                    for y, s in semesters
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestContentHash:
+    @pytest.fixture
+    def result(self):
+        r = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+        r.partial = False
+        return r
+
+    def path_of(self, tmp_path, result):
+        course = next(c for c in result.courses if c.syllabus_url)
+        return course, tmp_path / "115-1" / "syllabus" / f"{course.id}.json"
+
+    def test_the_file_carries_a_hash_and_no_fetch_timestamp(self, tmp_path, result):
+        """`fetched_at` 是 v2 每天製造三千多個 blob 的元凶,v3 拿掉了。"""
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+        _, path = self.path_of(tmp_path, result)
+        data = read(path)
+        assert "fetched_at" not in data
+        assert len(data["content_hash"]) == 16
+
+        state = read_syllabus_state(tmp_path)["115-1"]
+        entry = state[data["course_id"]]
+        assert entry["hash"] == data["content_hash"]
+        assert entry["at"].endswith("Z")
+
+    def test_the_hash_covers_everything_but_itself(self):
+        """雜湊要蓋住整份內容,不然改了欄位卻判成沒變。"""
+        from crawler.main import syllabus_content_hash
+
+        base = {"course_id": "1", "outline": "甲"}
+        assert syllabus_content_hash(base) != syllabus_content_hash(
+            {"course_id": "1", "outline": "乙"}
+        )
+        assert syllabus_content_hash(base) == syllabus_content_hash(
+            {**base, "content_hash": "無關"}
+        )
+
+    def test_unchanged_content_is_not_written_again(self, tmp_path, result):
+        """重點測試。內容一樣就整個不碰那個檔 —— keep_files 會保住遠端那份。
+
+        用「刪掉檔案再跑一次」來驗:如果程式還是寫了,檔案會回來。
+        """
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+        _, path = self.path_of(tmp_path, result)
+        path.unlink()
+
+        n = crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+        assert n > 0, "應該有重抓,只是不重寫"
+        assert not path.exists(), "內容沒變就不該再寫一次"
+
+    def test_changed_content_is_written_again(self, tmp_path, result):
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+        course, path = self.path_of(tmp_path, result)
+        path.unlink()
+
+        fetcher = FakeFetcher()
+        fetcher.no_syllabus = {course.syllabus_url}  # 老師把大綱清空了
+        crawl_syllabi(fetcher, result, tmp_path, limit=None, refresh_after=0.0)
+        assert read(path)["has_content"] is False
+
+    def test_a_v2_state_migrates_on_the_next_fetch(self, tmp_path, result):
+        """舊狀態沒有雜湊,下次抓到時會重寫一次 —— 一次性的搬遷,不是常態。"""
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+        index = read(tmp_path / "syllabus.json")
+        index["fetched"]["115-1"] = {
+            cid: row["at"] for cid, row in index["fetched"]["115-1"].items()
+        }
+        (tmp_path / "syllabus.json").write_text(json.dumps(index), encoding="utf-8")
+        _, path = self.path_of(tmp_path, result)
+        path.unlink()
+
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+        assert path.exists(), "沒有雜湊可比就要重寫一次"
+
+
+class TestFrozenSemesters:
+    @pytest.fixture
+    def result(self):
+        r = crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+        r.partial = False
+        return r
+
+    def test_a_historical_semester_never_refetches(self, tmp_path, result):
+        """回補完的歷史學期若沿用當期的 6 小時週期,每一班都會想重抓兩萬多頁。"""
+        seed_meta(tmp_path, (115, 1), (116, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=1, refresh_after=0.0)
+
+        fetcher = FakeFetcher()
+        crawl_syllabi(fetcher, result, tmp_path, limit=1, refresh_after=0.0)
+        # crawl_syllabi 只打大綱頁,所以請求數就是這一輪抓了幾門。
+        # 只補沒抓過的那一門,不會把上一批那門再抓一次。
+        assert fetcher.request_count == 1
+
+    def test_a_finished_backfill_collapses_the_state(self, tmp_path, result):
+        seed_meta(tmp_path, (115, 1), (116, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+
+        index = read(tmp_path / "syllabus.json")
+        with_url = len([c for c in result.courses if c.syllabus_url])
+        assert "115-1" not in index["fetched"], "逐課狀態應該收掉了"
+        assert index["frozen"]["115-1"]["fetched"] == with_url
+        entry = next(e for e in index["semesters"] if e["semester"] == "115-1")
+        assert entry["frozen"] is True
+        assert entry["with_url"] == with_url
+
+    def test_a_collapsed_semester_is_skipped_entirely(self, tmp_path, result):
+        seed_meta(tmp_path, (115, 1), (116, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+
+        fetcher = FakeFetcher()
+        assert (
+            crawl_syllabi(fetcher, result, tmp_path, limit=None, refresh_after=0.0) == 0
+        )
+        assert fetcher.request_count == 0
+
+    def test_a_half_finished_batch_does_not_collapse(self, tmp_path, result):
+        """--max-syllabus 砍短了 targets,「跑完」只代表跑完這一批。"""
+        seed_meta(tmp_path, (115, 1), (116, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=1, refresh_after=0.0)
+        index = read(tmp_path / "syllabus.json")
+        assert "frozen" not in index
+        assert len(index["fetched"]["115-1"]) == 1
+
+    def test_the_current_semester_never_collapses(self, tmp_path, result):
+        """當期抓完了也不能收合 —— 還要靠逐課狀態決定下一輪重抓哪些。"""
+        seed_meta(tmp_path, (115, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+        index = read(tmp_path / "syllabus.json")
+        assert "frozen" not in index
+        assert index["fetched"]["115-1"]
+
+
+    def test_an_already_complete_semester_collapses_when_it_ages_out(
+        self, tmp_path, result
+    ):
+        """115-2 一出現,115-1 就變成歷史學期 —— 那一輪沒東西可抓,但該收。"""
+        seed_meta(tmp_path, (115, 1))
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+        assert "frozen" not in read(tmp_path / "syllabus.json")
+
+        seed_meta(tmp_path, (115, 1), (115, 2))
+        fetcher = FakeFetcher()
+        assert (
+            crawl_syllabi(fetcher, result, tmp_path, limit=None, refresh_after=720.0)
+            == 0
+        )
+        assert fetcher.request_count == 0, "收合不該再打學校一次"
+        index = read(tmp_path / "syllabus.json")
+        assert "115-1" not in index["fetched"]
+        assert index["frozen"]["115-1"]["fetched"] > 0
+
+    def test_a_backfilled_semester_gets_no_enrollment_snapshot(self, tmp_path, result):
+        """回補 114-2 不該在今天的日期下留一筆「當年的人數」。
+
+        判斷用的是「這次是不是回補」,不是「是不是最新學期」—— 學校可能在
+        學期還沒結束時就把下一個學期掛上首頁,用後者會讓當期的人數快照
+        在期中無聲停掉。
+        """
+        from crawler.output import write_outputs
+
+        result.backfill = True
+        write_outputs(result, tmp_path)
+        assert not (tmp_path / "115-1" / "enrollment").exists()
+
+
+class TestSyllabusBackfillTargets:
+    def test_a_semester_with_no_syllabus_is_picked_up_again(self, tmp_path):
+        """課表抓過了、大綱還沒 —— 回補要把它排回來,而且理由講清楚。"""
+        from crawler.main import backfill_semesters
+
+        seed_meta(tmp_path, (114, 2), (114, 1))
+        picked = backfill_semesters((114, 114), tmp_path, need_syllabus=True)
+        assert [(s.path, why) for s, why in picked] == [
+            ("114-2", "補大綱"),
+            ("114-1", "補大綱"),
+        ]
+
+        # 不要大綱的話,這兩個學期早就抓過了,不該再排
+        assert backfill_semesters((114, 114), tmp_path) == []
+
+    def test_a_semester_whose_syllabus_is_done_is_left_alone(self, tmp_path):
+        from crawler.main import backfill_semesters
+
+        seed_meta(tmp_path, (114, 2), (114, 1))
+        (tmp_path / "syllabus.json").write_text(
+            json.dumps(
+                {
+                    "semesters": [
+                        {"semester": "114-2", "fetched": 10, "with_url": 10},
+                        {"semester": "114-1", "fetched": 3, "with_url": 10},
+                    ],
+                    "frozen": {"114-2": {"fetched": 10}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        picked = backfill_semesters((114, 114), tmp_path, need_syllabus=True)
+        assert [s.path for s, _ in picked] == ["114-1"]

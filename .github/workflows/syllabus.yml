@@ -22,7 +22,13 @@ name: syllabus
 # 落後一個月不能接受。每班全跑直接解掉,也不必為了開學期間手動調參數。
 #
 # 代價是每天約 94 分鐘的 runner 時間(兩班各約 47 分),以及學期中大綱不動
-# 時會拿回一模一樣的內容。單執行緒、1 秒延遲的規則一條都沒有放寬。
+# 時會拿回一模一樣的內容 —— 但**拿回一樣的內容不會產生任何 git 物件**:
+# schema v3 起大綱檔改帶 `content_hash`、不帶抓取時間,雜湊一樣就整個不重寫,
+# keep_files 讓遠端那份原封不動留著。單執行緒、1 秒延遲的規則一條都沒有放寬。
+#
+# 自動偵測會挑出首頁掛著的學期,所以偶爾會連上一個學期(目前是 114-2)一起
+# 抓。它是歷史學期,大綱只補沒抓過的,補完就收合、之後永遠跳過 —— 所以最多
+# 只有某一班會多花約 48 分鐘,不是每班都多。
 
 on:
   schedule:
@@ -147,8 +153,12 @@ jobs:
               total = s.get("with_url") or 0
               done = s.get("fetched") or 0
               pct = f"{done / total * 100:.1f}%" if total else "?"
-              print(f"{s['semester']}:已抓 {done}/{total}({pct}),"
-                    f"最舊一筆 {s.get('oldest_fetch')}")
+              if s.get("frozen"):
+                  print(f"{s['semester']}:已補完 {done}/{total}({pct}),"
+                        f"狀態已收合於 {s.get('frozen_at')}")
+              else:
+                  print(f"{s['semester']}:已抓 {done}/{total}({pct}),"
+                        f"最舊一筆 {s.get('oldest_fetch')}")
           PY
           else
             echo "尚無教學大綱資料"

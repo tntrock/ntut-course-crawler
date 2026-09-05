@@ -502,80 +502,204 @@ def write_syllabus(
     return path
 
 
-def read_syllabus_state(out_dir: Path) -> dict[str, dict[str, str]]:
-    """讀根目錄 `syllabus.json`,回傳 學期 → {課號: 抓取時間}。
+def is_frozen_semester(year: int, sem: int, out_dir: Path) -> bool:
+    """這個學年期的資料還會不會變?
 
-    用來決定「這門課的大綱抓過了沒、多久以前抓的」。放根目錄才能跟
-    meta / index / errors / changes / enrollment 一起被 workflow 還原 ——
-    學期子目錄不在 sparse checkout 的範圍內,放那裡等於每次都失憶。
+    只有**最新的那個學期**會變:開學前老師還在改大綱、加退選期間人數天天動。
+    學期跑完就定案了,再抓也只是拿回同樣的東西。
+
+    基準是 meta.json 裡已知的學年期,加上當下這一個(第一次抓它的時候
+    meta 裡還沒有)。meta.json 讀不到就當作不凍結,最壞的結果是多抓一輪,
+    不會漏抓。
+
+    兩個地方用到:回補歷史學期時不重抓已有的大綱,以及不為已經結束的學期
+    產生「今天的」人數快照。
+    """
+    known = set(read_semester_times(out_dir))
+    known.add((year, sem))
+    return (year, sem) < max(known)
+
+
+def read_syllabus_state(out_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
+    """讀根目錄 `syllabus.json`,回傳 學期 → {課號: {"at": 抓取時間, "hash": 內容雜湊}}。
+
+    用來決定「這門課的大綱抓過了沒、多久以前抓的、內容跟上次一不一樣」。
+    放根目錄才能跟 meta / index / errors / changes / enrollment 一起被 workflow
+    還原 —— 學期子目錄不在 sparse checkout 的範圍內,放那裡等於每次都失憶。
+
+    schema v2 的值是單純的時間字串,這裡一律正規化成 dict。沒有 `hash` 的
+    舊紀錄下次抓到時一定會判定成「內容有變」而重寫一次檔案,那是預期中的
+    一次性搬遷,之後就穩定了。
     """
     data = _read_json(Path(out_dir) / "syllabus.json") or {}
     state = data.get("fetched")
     if not isinstance(state, dict):
         return {}
+
+    normalised: dict[str, dict[str, dict[str, str]]] = {}
+    for sem, courses in state.items():
+        if not isinstance(courses, dict):
+            continue
+        rows: dict[str, dict[str, str]] = {}
+        for cid, entry in courses.items():
+            if isinstance(entry, str):  # v2:只有時間戳
+                rows[cid] = {"at": entry}
+            elif isinstance(entry, dict) and isinstance(entry.get("at"), str):
+                rows[cid] = {
+                    k: v for k, v in entry.items() if k in ("at", "hash")
+                }
+        if rows:
+            normalised[sem] = rows
+    return normalised
+
+
+def read_syllabus_frozen(out_dir: Path) -> dict[str, dict[str, Any]]:
+    """讀根目錄 `syllabus.json` 的 `frozen`,回傳 學期 → 收合時的統計。
+
+    **已收合的學期不再保留逐課狀態。** 理由是大小:一門課的狀態(課號 +
+    時間戳 + 雜湊)約 66 bytes,補完 110-1 起的 11 個學期就是兩萬多筆、
+    1.6 MB —— 而這個檔每次抓大綱都會整個重寫,等於把剛省下來的 blob
+    又用另一種形式吐回去。過去的學期不會再變動,收合成一個門數就夠了。
+
+    收合後 `crawl_syllabi` 會整個跳過那個學期,連 targets 都不算。
+    真要重抓,手動把該學期從 `frozen` 裡刪掉即可。
+    """
+    data = _read_json(Path(out_dir) / "syllabus.json") or {}
+    frozen = data.get("frozen")
+    if not isinstance(frozen, dict):
+        return {}
     return {
-        sem: {cid: at for cid, at in courses.items() if isinstance(at, str)}
-        for sem, courses in state.items()
-        if isinstance(courses, dict)
+        sem: entry for sem, entry in frozen.items() if isinstance(entry, dict)
     }
+
+
+def _semester_key(semester: str) -> tuple[int, int]:
+    """把 "115-1" 排成 (115, 1)。純字串排序會把 99-2 排在 110-1 前面。"""
+    try:
+        year, _, sem = semester.partition("-")
+        return int(year), int(sem)
+    except ValueError:
+        return (-1, -1)
+
+
+def syllabus_done_semesters(out_dir: Path) -> set[str]:
+    """哪些學期的大綱已經補完了(不必再排進回補批次)。
+
+    兩種算完成:狀態已收合成 `frozen` 的,或進度顯示抓到的門數已經追上
+    有大綱連結的門數。後者涵蓋的是**當期**—— 它抓完了但不會收合,因為
+    還要靠逐課狀態決定下一輪要重抓哪些。
+    """
+    data = _read_json(Path(out_dir) / "syllabus.json") or {}
+    done = set(read_syllabus_frozen(out_dir))
+    for entry in data.get("semesters") or []:
+        if not isinstance(entry, dict):
+            continue
+        semester, fetched, with_url = (
+            entry.get("semester"),
+            entry.get("fetched"),
+            entry.get("with_url"),
+        )
+        if (
+            isinstance(semester, str)
+            and isinstance(fetched, int)
+            and isinstance(with_url, int)
+            and with_url > 0
+            and fetched >= with_url
+        ):
+            done.add(semester)
+    return done
 
 
 def write_syllabus_index(
     out_dir: Path,
-    state: dict[str, dict[str, str]],
+    state: dict[str, dict[str, dict[str, str]]],
     totals: dict[str, dict[str, Any]],
     *,
+    frozen: dict[str, dict[str, Any]] | None = None,
     pretty: bool = False,
 ) -> None:
-    """根目錄 `syllabus.json`:每個學期抓到哪了,以及逐課的抓取時間。
+    """根目錄 `syllabus.json`:每個學期抓到哪了,以及逐課的抓取狀態。
 
-    `semesters` 是給人看的進度(抓了幾門 / 共幾門 / 最舊那筆多久以前),
-    `fetched` 是給下一次執行看的狀態。分開放是因為前者小、後者大,
-    前端要顯示進度不必吞下幾千筆時間戳。
+    三個區塊各有各的讀者:
+
+    - `semesters` 是給人看的進度(抓了幾門 / 共幾門 / 最舊那筆多久以前)。
+    - `fetched` 是給下一次執行看的逐課狀態(抓取時間 + 內容雜湊)。
+    - `frozen` 是已經補完、狀態收合掉的歷史學期,只留門數。
+
+    分開放是因為前者小、後者大,前端要顯示進度不必吞下幾千筆時間戳。
 
     `totals`(共幾門 / 幾門有大綱)只會帶**這次抓過的學期** —— 呼叫端一次
     只處理一個學期,不會知道別的學期有幾門課。所以其他學期的 totals 要從
     舊檔沿用,否則「抓了 1909 門 / 共幾門」的分母會在下一個學期跑完之後
     憑空消失,進度就只剩一個沒有基準的數字。
+
+    `frozen` 同理只帶**這次新收合的**學期,舊檔裡已經收合的要沿用 ——
+    它們的逐課狀態已經被丟掉了,舊紀錄是唯一的依據,洗掉等於下次執行
+    會把那個學期整個重抓一遍。收合是單向的,所以合併不會有衝突。
     """
-    previous_totals = {
-        entry["semester"]: {
-            key: entry[key] for key in ("course_count", "with_url") if key in entry
-        }
+    previous = {
+        entry["semester"]: entry
         for entry in ((_read_json(Path(out_dir) / "syllabus.json") or {}).get(
             "semesters"
         ) or [])
         if isinstance(entry, dict) and entry.get("semester")
     }
+    previous_totals = {
+        sem: {key: entry[key] for key in ("course_count", "with_url") if key in entry}
+        for sem, entry in previous.items()
+    }
+
+    all_frozen = dict(read_syllabus_frozen(out_dir))
+    all_frozen.update(frozen or {})
 
     trimmed = {
         sem: dict(sorted(courses.items())[:SYLLABUS_STATE_LIMIT])
-        for sem, courses in sorted(state.items(), reverse=True)
-        if courses
+        for sem, courses in state.items()
+        if courses and sem not in all_frozen
     }
-    semesters = []
+
+    entries: dict[str, dict[str, Any]] = {}
     for sem, courses in trimmed.items():
-        stamps = sorted(courses.values())
-        entry = {
+        # v2 的值是裸的時間字串。狀態一般都經過 read_syllabus_state 正規化,
+        # 但這裡不假設呼叫端一定走過那條路 —— 進度顯示不值得為此炸掉整批。
+        stamps = sorted(
+            row["at"] if isinstance(row, dict) else row for row in courses.values()
+        )
+        entries[sem] = {
             "semester": sem,
             "fetched": len(courses),
             "oldest_fetch": stamps[0] if stamps else None,
             "newest_fetch": stamps[-1] if stamps else None,
         }
+    for sem, info in all_frozen.items():
+        entries[sem] = {
+            "semester": sem,
+            "fetched": info.get("fetched"),
+            "frozen": True,
+            "frozen_at": info.get("at"),
+        }
+
+    semesters = []
+    for sem in sorted(entries, key=_semester_key, reverse=True):
+        entry = entries[sem]
         entry.update(previous_totals.get(sem) or {})
         entry.update(totals.get(sem) or {})
         semesters.append(entry)
 
-    _write_json(
-        Path(out_dir) / "syllabus.json",
-        {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": _now(),
-            "semesters": semesters,
-            "fetched": trimmed,
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _now(),
+        "semesters": semesters,
+        "fetched": {
+            sem: trimmed[sem] for sem in sorted(trimmed, key=_semester_key, reverse=True)
         },
-        pretty,
-    )
+    }
+    if all_frozen:
+        payload["frozen"] = {
+            sem: all_frozen[sem]
+            for sem in sorted(all_frozen, key=_semester_key, reverse=True)
+        }
+    _write_json(Path(out_dir) / "syllabus.json", payload, pretty)
 
 
 # --------------------------------------------------------------------------
@@ -599,6 +723,12 @@ def _write_enrollment_snapshot(
     """
     if result.partial:
         log.info("局部抓取(--dept),略過人數快照")
+        return
+
+    if result.backfill:
+        # 回補歷史學期時會走到這裡。那個學期早就結束了,人數是定案的數字,
+        # 存成一份「今天的」快照只會在時間軸上多一個假的轉折點。
+        log.info("%s 是回補,略過人數快照", result.semester)
         return
 
     rows = [

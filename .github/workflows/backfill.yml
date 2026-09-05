@@ -6,6 +6,14 @@ name: backfill
 #
 # 只手動觸發。回補是一次性工作:過去的學期不會再變動,已經抓過的學期會被
 # 永久跳過,所以重複執行這支就是自動接續上一批的進度,不必記到哪了。
+#
+# 勾了 with_syllabus 就連教學大綱一起補。判斷「抓過了沒」的標準會跟著變嚴:
+# 課表有了但大綱還沒抓的學期會重新排進來 —— 它必須先重抓一次課表(約 355
+# 頁),因為每門課的大綱網址只有課表頁面上才有。
+#
+# 2026-09-05 實測學校保留的大綱範圍:96-1 起每學期都有兩千多門課掛著大綱
+# 連結,95-2 以前塌到 12% 以下、而且點進去是沒有內容的空殼。所以補到 96
+# 學年度就是極限,再往前沒有東西可補。
 
 on:
   workflow_dispatch:
@@ -13,9 +21,13 @@ on:
       years:
         description: '學年度範圍,例 90-114'
         default: '90-114'
+      with_syllabus:
+        description: '連教學大綱一起補(慢很多:一個學期約 51 分鐘,而不是 9 分鐘)'
+        type: boolean
+        default: false
       max_semesters:
-        description: '這批最多抓幾個學期(避開 Actions 單 job 6 小時上限)'
-        default: '12'
+        description: '這批最多抓幾個學期(留空 = 自動:純回補 12、補大綱 3)'
+        default: ''
       delay:
         description: '每次請求後的延遲秒數(下限 0.5)'
         default: '1.0'
@@ -51,12 +63,13 @@ jobs:
 
       # 那幾個跨學期的檔案一定要先撈回來,理由見 restore-note.md。
       # 對回補還多一層意義:meta.json 就是「哪些學期抓過了」的唯一依據,
-      # 沒有它每一批都會從頭再抓一次。
+      # syllabus.json 則是「哪些學期的大綱補完了」的唯一依據 ——
+      # 沒有它們,每一批都會從頭再抓一次。
       - name: Restore shared index files
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json changes.json enrollment.json; do
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"
@@ -72,30 +85,74 @@ jobs:
         run: |
           if [ -f data/meta.json ]; then
             python - <<'PY'
-          import json
+          import json, pathlib
           meta = json.load(open("data/meta.json", encoding="utf-8"))
           done = sorted(s["path"] for s in meta.get("semesters", []))
-          print(f"已有 {len(done)} 個學期:{', '.join(done)}")
+          print(f"課表已有 {len(done)} 個學期:{', '.join(done)}")
+
+          p = pathlib.Path("data/syllabus.json")
+          if p.exists():
+              syl = json.loads(p.read_text(encoding="utf-8"))
+              for e in syl.get("semesters", []):
+                  total = e.get("with_url") or 0
+                  got = e.get("fetched") or 0
+                  pct = f"{got / total * 100:.1f}%" if total else "?"
+                  mark = "(已收合)" if e.get("frozen") else ""
+                  print(f"大綱 {e['semester']}:{got}/{total}({pct}){mark}")
+          else:
+              print("尚無教學大綱資料")
           PY
           else
             echo "尚無任何學期資料"
           fi
 
+      # 失敗就等 30 分鐘整批重來,最多 3 次。跟 crawl / syllabus 同一套理由:
+      # crawler 內部的重試治得了線路抖動,治不了學校端幾十分鐘的中斷。
+      # 重試很便宜 —— .cache/ 在同一個 job 內共用,已經抓好的頁面不會再打一次,
+      # 所以重試主要是在補剩下的部分,不是從頭再跑一遍。
+      #
+      # 回補本來就是可以分批的:中途放棄不會弄壞任何東西,已經補完的學期
+      # 下一次執行會自動跳過,再按一次就接著跑。
       - name: Backfill
         env:
           YEARS: ${{ inputs.years }}
           MAX_SEMESTERS: ${{ inputs.max_semesters }}
           DELAY: ${{ inputs.delay }}
           ALL_SEMESTERS: ${{ inputs.all_semesters }}
+          WITH_SYLLABUS: ${{ inputs.with_syllabus }}
+          MAX_ATTEMPTS: '3'
+          RETRY_WAIT_SECONDS: '1800'
         run: |
-          args=(--out data/ --years "$YEARS" --delay "$DELAY")
-          if [ -n "$MAX_SEMESTERS" ]; then
-            args+=(--max-semesters "$MAX_SEMESTERS")
+          # 一個學期補大綱約 51 分鐘(355 頁課表 + 約 2,200 頁大綱,1.2 秒/頁),
+          # 純回補只要約 9 分鐘。單 job 上限 6 小時,所以兩種模式的批量差很多。
+          if [ -z "$MAX_SEMESTERS" ]; then
+            if [ "$WITH_SYLLABUS" = "true" ]; then
+              MAX_SEMESTERS=3
+            else
+              MAX_SEMESTERS=12
+            fi
+            echo "max_semesters 留空,自動用 $MAX_SEMESTERS"
           fi
+
+          args=(--out data/ --years "$YEARS" --delay "$DELAY"
+                --max-semesters "$MAX_SEMESTERS")
           if [ "$ALL_SEMESTERS" = "true" ]; then
             args+=(--all-semesters)
           fi
-          python -m crawler.main "${args[@]}"
+          if [ "$WITH_SYLLABUS" = "true" ]; then
+            args+=(--with-syllabus)
+          fi
+
+          attempt=1
+          until python -m crawler.main "${args[@]}"; do
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::連續 $attempt 次失敗,放棄本批(已補完的學期會發布出去,再按一次就接續)"
+              exit 1
+            fi
+            echo "::warning::第 $attempt 次失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
+            sleep "$RETRY_WAIT_SECONDS"
+            attempt=$((attempt + 1))
+          done
 
       # 首頁。gh-pages 根目錄沒有 index.html 的話,GitHub Pages 會退而直接把
       # 1.5 MB 的 index.json 吐給訪客 —— 那不是給人看的東西。

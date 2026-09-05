@@ -59,7 +59,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
 | `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 120 KB / 天 |
-| `syllabus.json` | 教學大綱的抓取進度（見下） | 隨課數變動 |
+| `syllabus.json` | 教學大綱的抓取進度與逐課狀態（見下） | 隨課數變動 |
 | `{semester}/syllabus/{course_id}.json` | 單一課程的教學大綱與進度 | 約 3–8 KB / 門 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
 | `{semester}/departments.json` | 學院 / 系所 / 班級三層對照 | 48 KB |
@@ -243,9 +243,9 @@ https://tntrock.github.io/ntut-course-crawler/
   "course_id": "364893", "course_name": "數位影像處理",
   "teachers": ["白敦文"], "department_ids": ["59"],
   "url": "https://aps.ntut.edu.tw/course/tw/ShowSyllabus.jsp?snum=364893&code=12095",
-  "fetched_at": "2026-09-05T19:12:44Z",
   "updated_at": "2026-08-11T01:00:23Z",
   "has_content": true,
+  "content_hash": "3f8a1c04b27de591",
 
   "teacher_name": "白敦文", "teacher_email": "twp@ntut.edu.tw",
   "outline": "This course will be lectured in Chinese/English…",
@@ -264,7 +264,9 @@ https://tntrock.github.io/ntut-course-crawler/
 ```
 
 - `updated_at` 是**老師最後修改大綱的時間**（學校顯示台灣時間，這裡轉成 UTC，
-  跟全站其他時間戳一致）；`fetched_at` 是我們抓下來的時間。
+  跟全站其他時間戳一致）。
+- `content_hash` 是這份內容的指紋（sha256 前 16 個 hex 字）。**內容沒變就不會重寫這個檔**，
+  所以拿它當快取鍵是安全的。我們抓下來的時間不在這個檔裡 —— 見下面的 v3 說明。
 - `has_content` 為 `false` 代表老師還沒填。檔案仍然會產生 —— 沒有它的話，
   每次執行都會再去問一次同一頁。
 - 條列式的欄位（`sdgs`、`ai_usage`、`contact`、`extended_resources`）輸出成陣列，
@@ -298,7 +300,7 @@ https://tntrock.github.io/ntut-course-crawler/
 - 沒有 `syllabus_url` 的課直接跳過 —— 跨校選課那類在北科系統裡沒有大綱連結，
   所以是 1,909 門而不是 2,717 門
 - 每抓一門就落地，中途失敗不會賠掉已經抓好的；下次執行接著抓
-- `syllabus.json` 記著每門課上次抓的時間，重抓週期預設 **6 小時**
+- `syllabus.json` 記著每門課上次抓的時間與內容雜湊，重抓週期預設 **6 小時**
   （`--syllabus-refresh-after`）—— 必須小於兩班被排程延遲壓縮後的間隔，
   否則上一班抓過的這一班全被跳過
 - `--max-syllabus N` 可以只抓一批（冒煙測試用），預設 `0` = 不限
@@ -310,6 +312,77 @@ https://tntrock.github.io/ntut-course-crawler/
 例行的 `crawl` workflow **完全不碰大綱**，維持 355 個請求、8 分鐘跑完。
 每天的總請求數約 6,660 次（4 小時排程 6 × 355，加大綱那支兩班的 2 × 2,264），
 仍然是單執行緒、每次請求後 sleep 1 秒 —— 抓取禮儀一條都沒有放寬。
+
+#### 大綱涵蓋哪些學期
+
+課表回補到 90 學年度，**大綱只補到 110-1**。往前是可以補的，往前補到底則不划算：
+
+| 學期 | 有大綱連結 / 總課數 | |
+|---|---|---|
+| 115-1 | 1,911 / 2,717 | 70.3% |
+| 110-1 | 2,302 / 3,084 | 74.6% |
+| 100-1 | 2,173 / 2,777 | 78.2% |
+| 96-1 | 1,908 / 2,591 | 73.6% |
+| **95-2** | 291 / 2,462 | **11.8%** ← 斷層 |
+| 90-1 | 17 / 2,428 | 0.7% |
+
+2026-09-05 掃過 gh-pages 上全部 51 個學期的統計。**96-1 是學校那邊的分界線**：
+96-1 起每學期都有兩千多門課掛著大綱連結，95-2 以前塌到 12% 以下，
+而且實抓一頁確認過那些是**空殼** —— HTTP 200、只有課號課名那張表，
+內容欄位全空（`snum=100001` 那頁 3.7 KB，解析結果是 `{}`）。
+96-1 到 110-1 之間的大綱是完整的（實抓 110-1 一頁驗證過，教學目標、每週進度、
+評分方式、教材都在），要往前補只要把 `backfill` 的 `years` 往前調即可。
+
+補到 110-1 是容量上的選擇：11 個學期約 24,000 份大綱，估計讓 gh-pages 從
+44 MB 長到 100 MB 上下；補到 96-1 則是 40 個學期、八萬多份，會逼近 300 MB。
+
+#### 為什麼大綱檔沒有「抓取時間」
+
+`fetched_at` 在 v2 的時候是放在每份大綱檔裡的，那是個很貴的錯誤：
+一天兩班、每班 1,909 份，即使老師一個字都沒改，git 也會收下 1,909 個新 blob。
+gh-pages 一天長 1.2 MB，八成是這樣來的。
+
+v3 改成比對**內容雜湊**：
+
+- 大綱檔帶 `content_hash`，不帶任何時間戳
+- 抓下來算一次雜湊，跟 `syllabus.json` 裡記的比對，**一樣就整個不寫那個檔**
+- 沒寫的檔不在 `publish_dir` 裡，`keep_files: true` 會讓遠端那份原封不動留著
+
+所以學期中大綱不動的日子，兩班大綱跑完的 git 增量接近零。
+「這份是什麼時候抓的」改到 `syllabus.json` 裡查。
+
+#### `syllabus.json` 的三個區塊
+
+```json
+{
+  "schema_version": 3,
+  "semesters": [
+    {"semester": "115-1", "fetched": 1909, "with_url": 1909, "course_count": 2717,
+     "oldest_fetch": "2026-09-05T06:01:09Z", "newest_fetch": "2026-09-05T06:41:05Z"},
+    {"semester": "114-2", "fetched": 1968, "with_url": 1968,
+     "frozen": true, "frozen_at": "2026-09-06T02:11:40Z"}
+  ],
+  "fetched": {
+    "115-1": {"360744": {"at": "2026-09-05T06:01:09Z", "hash": "3f8a1c04b27de591"}}
+  },
+  "frozen": {"114-2": {"fetched": 1968, "with_url": 1968, "at": "2026-09-06T02:11:40Z"}}
+}
+```
+
+- `semesters` 是給人看的進度，一個學期一列
+- `fetched` 是給下一次執行看的逐課狀態（抓取時間 + 內容雜湊）
+- `frozen` 是**已經補完、逐課狀態收掉了**的歷史學期，只留門數
+
+收合是為了大小：一門課的狀態約 66 bytes，11 個學期兩萬多筆就是 1.6 MB，
+而這個檔每次抓大綱都會整個重寫 —— 那等於把剛用雜湊省下來的 blob
+換一種形式吐回去。過去的學期不會再變動，一個門數就夠了。
+
+**收合過的學期，`crawl_syllabi` 會整個跳過**，連 targets 都不算。
+真要重抓，手動把該學期從 `frozen` 裡刪掉再跑一次 `backfill`。
+
+> 判斷「這學期還會不會變」的依據是 meta.json 裡最新的那個學年期。
+> 只有最新學期會被重抓；歷史學期一律只補沒抓過的，`--syllabus-refresh-after`
+> 對它們無效。沒有這條規則的話，補完 110-1 之後每一班都會想重抓兩萬多頁。
 
 ### 為什麼檔名是代碼而不是中文？
 
@@ -410,7 +483,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-09-04T02:03:11Z",
   "source": { "name": "國立臺北科技大學 課程查詢系統", "url": "https://aps.ntut.edu.tw/course/tw/" },
   "disclaimer": "本資料由非官方爬蟲自動蒐集,僅供參考…",
@@ -456,7 +529,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "year": 115, "sem": 1,
   "teacher": {
     "id": "12095",
@@ -503,7 +576,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "year": 115, "sem": 1,
   "departments": [
     {
@@ -529,7 +602,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "year": 115, "sem": 1,
   "department": { "id": "59", "name": "資工系", "college": "電資學院", "url": "…" },
   "course_count": 53,
@@ -572,7 +645,7 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "covers": ["115-1", "114-2"],
   "course_count": 5264,
   "courses": [
@@ -697,12 +770,28 @@ https://tntrock.github.io/ntut-course-crawler/
 
 ## `schema_version` 與相容性承諾
 
-每個 JSON 檔的頂層都有 `"schema_version"`。目前是 **2**。
+每個 JSON 檔的頂層都有 `"schema_version"`。目前是 **3**。
 
 - **新增欄位、新增端點不會升版。** 請用「忽略不認得的欄位」的方式寫你的程式。
 - **移除欄位、改欄位型別、改欄位語意會升版**，並在此處說明。
 - 升版時舊版路徑不保證保留 —— 這是免費的靜態檔案服務，請鎖定你測試過的版本號，
   發現 `schema_version` 變了就先檢查再上線。
+
+### v3（2026-09-05）
+
+只影響教學大綱，把 v2 沒做完的那半件事做完。
+
+| 改動 | 影響 |
+|---|---|
+| `{semester}/syllabus/{課號}.json` 不再有 `fetched_at` | 要知道何時抓的，讀 `syllabus.json` 的 `fetched[學期][課號].at` |
+| 同一個檔新增 `content_hash` | 加欄位，不影響既有使用端 |
+| `syllabus.json` 的 `fetched[學期][課號]` 從字串變成物件 | 原本是抓取時間字串，現在是 `{"at": ..., "hash": ...}` |
+| `syllabus.json` 新增 `frozen` 區塊 | 已補完的歷史學期只留門數，逐課狀態不再保留 |
+
+**為什麼要動：** 跟 v2 拿掉 `generated_at` 完全同一個理由，只是漏了大綱這一塊。
+`fetched_at` 每次抓取都變，一天兩班、每班 1,909 份大綱，即使內容一個字都沒改，
+git 也會收下 1,909 個新 blob。改成比對內容雜湊之後，沒變就不重寫那個檔，
+配合 `keep_files: true`，遠端那份原封不動留著。
 
 ### v2（2026-09-04）
 
@@ -725,6 +814,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `crawl` | 每 4 小時 | 00、04、08、12、16、20 時 |
 | `syllabus` | 一天兩次 | 09、21 時 |
 | `crawl`（整包重建） | 每月一次 | 1 號 14 時 |
+| `backfill` | 只手動 | 補歷史學期的課表與大綱 |
 
 **別把 cron 的時間當成實際執行時間。** GitHub Actions 只保證「不早於」，
 這個 repo 實測常遲 **2～4 小時** —— 2026-09-04 排在 UTC 19:00 的大綱那班遲了
@@ -758,8 +848,15 @@ https://tntrock.github.io/ntut-course-crawler/
 - 過去的學期資料不會變動，重抓沒有意義，也是對學校無謂的負擔
 - 每 4 小時的例行抓取**完全不碰**歷史資料（發布時用 `keep_files`，
   只推當期的檔案），所以歷史資料的存在不會拖慢日常更新
+- 已經結束的學期不會產生「今天的」人數快照 —— 那個學期的數字早就定案了，
+  在時間軸上多一個今天的轉折點只會誤導
 
 如果哪個歷史學期抓壞了，重跑 `backfill` 並勾 `all_semesters` 就會重抓。
+
+**補大綱**勾 `with_syllabus`。判斷「抓過了沒」會跟著變嚴：課表有了但大綱還沒抓的
+學期會重新排進來，並且先重抓一次課表（每門課的大綱網址只有課表頁面上才有）。
+一個學期因此要約 51 分鐘而不是 9 分鐘，所以 `max_semesters` 留空時會自動用 3。
+補完的學期會在 `syllabus.json` 的 `frozen` 裡登記，之後永遠跳過。
 
 ### 每月一次的整包重建
 
@@ -790,7 +887,9 @@ https://tntrock.github.io/ntut-course-crawler/
   該系統每個學期只提供這一個上課時間表入口，因此這棵樹爬完即無遺漏。
   暑期課程（`Summer.jsp`）、學程查詢、教室使用情形不在本專案範圍。
 - **教學大綱有抓**（見上），一天全量更新兩次，所以最多落後半天。
-  確切時間看該檔的 `fetched_at`；老師最後修改的時間是 `updated_at`。
+  確切時間看 `syllabus.json` 的 `fetched[學期][課號].at`；
+  老師最後修改的時間是該檔的 `updated_at`。
+  **大綱只涵蓋 110-1 以後**，更早的學期只有課表。
 - 學程查詢系統不在範圍內，所以查得到「無人機微學程有哪些課」，
   查不到「修完幾門才算完成該微學程」。
 - **沒有進修部的獨立入口。** 實地確認過總覽頁的 60 個單位裡沒有進修部，
@@ -880,7 +979,7 @@ python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 | `--pretty` | 輸出縮排過的 JSON（檔案會變大） |
 | `--with-syllabus` | 順便抓教學大綱（一門課一頁，很慢，預設關閉） |
 | `--max-syllabus N` | 這次最多抓幾頁大綱，預設 `0` = 不限（全校一輪約 38 分鐘） |
-| `--syllabus-refresh-after H` | 同一門課的大綱隔多久重抓，預設 `6` 小時（配合一天兩班各全跑一輪） |
+| `--syllabus-refresh-after H` | 同一門課的大綱隔多久重抓，預設 `6` 小時（配合一天兩班各全跑一輪）。**只對最新學期有效**，歷史學期一律只補沒抓過的 |
 | `--log-level` | 記錄層級，預設 `INFO`。抓不到東西時開 `DEBUG` 看實際打了哪些 URL |
 
 ### 測試

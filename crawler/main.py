@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import sys
 import time
@@ -26,7 +28,10 @@ from .config import SCHEMA_VERSION
 from .http import Fetcher, SiteUnavailable
 from .models import ClassGroup, Course, Department, Semester
 from .output import (
+    is_frozen_semester,
     read_semester_times,
+    syllabus_done_semesters,
+    read_syllabus_frozen,
     read_syllabus_state,
     write_outputs,
     write_semester_failure,
@@ -91,6 +96,11 @@ class CrawlResult:
     failed_departments: int = 0
     merged_courses: int = 0  # 同課號在多個班級頁重複出現、被合併掉的次數
     partial: bool = False  # --dept 只抓了部分單位,資料集不完整
+    # 這次是 --years 的回補。回補的對象是已經結束的學期,不該留下「今天的」
+    # 人數快照 —— 那個學期的數字早就定案,在時間軸上多一個今天的轉折點
+    # 只會誤導。刻意不用「是不是最新學期」來判斷:學校可能在學期還沒結束時
+    # 就把下一個學期掛上首頁,那樣會讓當期的人數快照在期中無聲停掉。
+    backfill: bool = False
     elapsed: float = 0.0
 
     @property
@@ -185,6 +195,7 @@ def backfill_semesters(
     *,
     force_all: bool = False,
     limit: int | None = None,
+    need_syllabus: bool = False,
 ) -> list[tuple[Semester, str]]:
     """回補:列出指定學年度範圍內、還沒抓過的學期,由新到舊。
 
@@ -195,16 +206,28 @@ def backfill_semesters(
     **已經有完整資料的學期永久跳過**,不看新舊。過去的學期不會再變動,
     重抓沒有意義;而且這讓回補可以分批跑,中途失敗再跑一次就會接續下去。
     `--all-semesters` 可以強制重抓。
+
+    `need_syllabus`(即 `--with-syllabus`)會多要求一件事:大綱也補完了才算
+    抓過。課表已經有、但大綱還沒抓的學期會重新排進來 —— 它必須先重抓一次
+    課表(約 355 頁),因為每門課的大綱網址只有課表頁面上有。
     """
     known = read_semester_times(out_dir)
+    syllabus_done = syllabus_done_semesters(out_dir) if need_syllabus else set()
     start, end = years
     picked: list[tuple[Semester, str]] = []
 
     for year in range(end, start - 1, -1):
         for sem in (2, 1):  # 同一學年度裡第 2 學期比較新
+            semester = Semester(year=year, sem=sem)
             if not force_all and (year, sem) in known:
+                if not need_syllabus or semester.path in syllabus_done:
+                    continue
+                picked.append((semester, "補大綱"))
+                if limit is not None and len(picked) >= limit:
+                    log.info("已達 --max-semesters 上限 %d,其餘留給下一批", limit)
+                    return picked
                 continue
-            picked.append((Semester(year=year, sem=sem), "回補"))
+            picked.append((semester, "回補"))
             if limit is not None and len(picked) >= limit:
                 log.info("已達 --max-semesters 上限 %d,其餘留給下一批", limit)
                 return picked
@@ -350,6 +373,9 @@ def select_syllabus_targets(
 
     分批的意義在於:全校一輪要 45 分鐘,每天抓一批、幾天輪完一圈,
     對學校溫和得多。排序保證每一門最終都會輪到,不會有課永遠排不到。
+
+    `refresh_after=inf` 代表「只補沒抓過的,抓過的一律不重抓」——
+    歷史學期的大綱是凍結的,回補完就不該再打學校一次。
     """
     now = now or datetime.now(timezone.utc)
     stale: list[tuple[float, Course]] = []
@@ -357,8 +383,10 @@ def select_syllabus_targets(
     for course in courses:
         if not course.syllabus_url:
             continue
-        raw = fetched.get(course.id)
-        if raw is None:
+        entry = fetched.get(course.id)
+        # schema v2 的狀態是單純的時間字串,v3 起是 {"at": ..., "hash": ...}
+        raw = entry.get("at") if isinstance(entry, dict) else entry
+        if not isinstance(raw, str):
             stale.append((float("inf"), course))  # 沒抓過的排最前面
             continue
         try:
@@ -378,6 +406,22 @@ def select_syllabus_targets(
     return picked
 
 
+def syllabus_content_hash(payload: dict[str, Any]) -> str:
+    """大綱內容的指紋。**不含任何時間戳**,那正是重點。
+
+    v2 的大綱檔帶 `fetched_at`,於是一天兩班、每班 1,909 份大綱,即使老師
+    一個字都沒改,git 也會收下 1,909 個新 blob —— gh-pages 就是這樣一天
+    長 1.2 MB 的。改成比對內容雜湊,沒變就整個不重寫那個檔,配合
+    `keep_files: true`,遠端那份原封不動留著。
+
+    16 個 hex 字(64 bits)對八萬多份文件綽綽有餘,而且比全長 sha256
+    省下三分之二的狀態檔體積。
+    """
+    stable = {k: v for k, v in payload.items() if k != "content_hash"}
+    blob = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def crawl_syllabi(
     fetcher: Fetcher,
     result: CrawlResult,
@@ -391,9 +435,30 @@ def crawl_syllabi(
 
     **每抓一門就落地。** 一批 800 頁要十幾分鐘,中途失敗時已經抓好的
     不該跟著賠掉 —— 下次執行會從沒抓過的那些接著抓。
+
+    **已經收合的歷史學期整個跳過。** 見 `read_syllabus_frozen`。
     """
+    frozen_semesters = read_syllabus_frozen(out_dir)
+    if result.semester in frozen_semesters:
+        log.info(
+            "%s 的大綱已於 %s 補完並收合,跳過",
+            result.semester,
+            frozen_semesters[result.semester].get("at") or "?",
+        )
+        return 0
+
+    frozen = is_frozen_semester(result.year, result.sem, out_dir)
+    if frozen and refresh_after != float("inf"):
+        # 歷史學期的大綱不會再變。沿用當期的 6 小時週期會讓每一班都想重抓
+        # 兩萬多頁 —— 那是回補完之後最容易踩到的坑,在這裡一次擋掉。
+        log.info("%s 不是最新學期,大綱只補沒抓過的", result.semester)
+        refresh_after = float("inf")
+
     state = read_syllabus_state(out_dir)
     fetched = dict(state.get(result.semester) or {})
+    missing_before = sum(
+        1 for c in result.courses if c.syllabus_url and c.id not in fetched
+    )
     targets = select_syllabus_targets(
         result.courses, fetched, limit=limit, refresh_after=refresh_after
     )
@@ -405,10 +470,15 @@ def crawl_syllabi(
         len(fetched),
         len(targets),
     )
-    if not targets:
+    # 沒事做就連 syllabus.json 都不要重寫。唯一的例外是「已經補完、但還沒
+    # 收合」的歷史學期 —— 例如當期剛換代、上一個學期昨天才變成歷史學期,
+    # 這時 targets 本來就是空的,但該收的狀態還留著。
+    if not targets and not (frozen and missing_before == 0):
         return 0
 
     ok = 0
+    written = 0
+    interrupted = False
     for index, course in enumerate(targets, start=1):
         if index % 100 == 0:
             log.info("教學大綱 [%d/%d]", index, len(targets))
@@ -427,12 +497,13 @@ def crawl_syllabi(
             )
             if isinstance(exc, SiteUnavailable):
                 log.error("站台已判定不可用,停止抓大綱;已抓好的保留")
+                interrupted = True
                 break
             continue
 
         parsed = parse_syllabus(html)
         if not parsed:
-            # 老師沒填大綱。記下時間戳,不然每次執行都會再來問一次同一頁。
+            # 老師沒填大綱。記下狀態,不然每次執行都會再來問一次同一頁。
             log.debug("課程 %s 沒有大綱內容", course.id)
 
         payload = {
@@ -444,18 +515,55 @@ def crawl_syllabi(
             "teachers": list(course.teachers),
             "department_ids": list(course.department_ids),
             "url": course.syllabus_url,
-            "fetched_at": _utc_now(),
             "has_content": bool(parsed),
             **parsed,
         }
-        write_syllabus(out_dir, result.semester, course.id, payload, pretty=pretty)
-        fetched[course.id] = payload["fetched_at"]
+        digest = syllabus_content_hash(payload)
+        payload["content_hash"] = digest
+
+        previous = fetched.get(course.id) or {}
+        if digest != previous.get("hash"):
+            # 內容變了(或這是第一次抓)才落地。沒變就讓 keep_files 保留
+            # 遠端那份 —— 本機根本沒有那個檔,不寫就是不動它。
+            write_syllabus(out_dir, result.semester, course.id, payload, pretty=pretty)
+            written += 1
+
+        fetched[course.id] = {"at": _utc_now(), "hash": digest}
         ok += 1
 
     state[result.semester] = fetched
     totals = {result.semester: {"course_count": len(result.courses), "with_url": have}}
-    write_syllabus_index(out_dir, state, totals, pretty=pretty)
-    log.info("%s 教學大綱本次抓了 %d 門", result.semester, ok)
+
+    # 收合的條件抓得很嚴:必須是歷史學期、這一輪沒被站台中斷、而且 --max-syllabus
+    # 沒有把 targets 砍短(否則「跑完了」只代表跑完這一批,不代表補完了)。
+    newly_frozen: dict[str, dict[str, Any]] | None = None
+    if frozen and not interrupted and len(targets) >= missing_before:
+        remaining = have - len(fetched)
+        newly_frozen = {
+            result.semester: {
+                "fetched": len(fetched),
+                "with_url": have,
+                "at": _utc_now(),
+            }
+        }
+        if remaining:
+            # 補不到的通常是學校那頁本身壞掉,已經記在 errors.json 裡。
+            # 為了幾筆固定失敗的課而讓兩千多筆狀態一直留在 syllabus.json,
+            # 划不來 —— 記下缺口,要重試就手動把這學期從 frozen 刪掉。
+            newly_frozen[result.semester]["missing"] = remaining
+            log.warning("%s 有 %d 門大綱始終抓不到,見 errors.json", result.semester, remaining)
+        state.pop(result.semester, None)
+        log.info("%s 的大綱補完,狀態收合成一筆(%d 門)", result.semester, len(fetched))
+
+    write_syllabus_index(
+        out_dir, state, totals, frozen=newly_frozen, pretty=pretty
+    )
+    log.info(
+        "%s 教學大綱本次抓了 %d 門,其中 %d 門內容有變動而重寫",
+        result.semester,
+        ok,
+        written,
+    )
     return ok
 
 
@@ -584,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
             result = crawl(
                 fetcher, semester.year, semester.sem, only_departments=args.dept
             )
+            result.backfill = bool(args.years)
         except Exception as exc:
             # 學期層級的容錯。總覽頁抓不到(學校維護、連線逾時)時,原本會
             # 一路往上炸掉整個執行 —— 一批 12 個學期跑到第 8 個掛掉,
@@ -659,6 +768,7 @@ def _targets(args: argparse.Namespace, fetcher: Fetcher) -> list[tuple[Semester,
             args.out,
             force_all=args.all_semesters,
             limit=args.max_semesters,
+            need_syllabus=args.with_syllabus,
         )
         log.info(
             "回補 %s:本次要抓 %d 個學期:%s",
