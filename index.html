@@ -5,60 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>北科課程資料 靜態 API</title>
 <meta name="description" content="國立臺北科技大學課程資料的非官方靜態 JSON API,涵蓋 90 學年度至今。">
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b675f; --line: #e3ded4;
-    --card: #ffffff; --accent: #8a5a2b; --code-bg: #f2efe9;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #171614; --fg: #eae7e1; --muted: #9c968a; --line: #33302b;
-      --card: #201e1b; --accent: #d9a066; --code-bg: #262320;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 2.5rem 1.25rem 4rem;
-    background: var(--bg); color: var(--fg);
-    font: 16px/1.7 system-ui, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
-  }
-  main { max-width: 52rem; margin: 0 auto; }
-  h1 { font-size: 1.7rem; margin: 0 0 .3rem; letter-spacing: -.01em; }
-  h2 { font-size: 1.1rem; margin: 2.5rem 0 .75rem; }
-  p { margin: .5rem 0; }
-  .lede { color: var(--muted); margin-bottom: 1.5rem; }
-  a { color: var(--accent); }
-  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; font-size: .89em; }
-  pre {
-    background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px;
-    overflow-x: auto; font-size: .85rem; line-height: 1.6;
-  }
-  pre code { background: none; padding: 0; }
-  .note {
-    border-left: 3px solid var(--accent); background: var(--card);
-    padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
-    font-size: .93rem;
-  }
-  .stats { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
-  .stat {
-    flex: 1 1 8rem; background: var(--card); border: 1px solid var(--line);
-    border-radius: 8px; padding: .8rem 1rem;
-  }
-  .stat b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
-  .stat span { color: var(--muted); font-size: .8rem; }
-  .tablewrap { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
-  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: .82rem; }
-  td:first-child { white-space: nowrap; }
-  footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
-           color: var(--muted); font-size: .87rem; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
+
+<nav class="pages">
+  <a href="index.html" aria-current="page">首頁</a>
+  <a href="status.html">狀態</a>
+  <a href="errors.html">錯誤</a>
+  <a href="changes.html">異動</a>
+</nav>
 
 <h1>北科課程資料 靜態 API</h1>
 <p class="lede">
@@ -139,17 +96,8 @@ console.log(dept.course_count, dept.courses[0].name_zh);</code></pre>
 
 </main>
 
+<script src="app.js"></script>
 <script>
-// generated_at 是 UTC(結尾的 Z),顯示時換成台灣時間。
-function taipei(iso) {
-  const d = new Date(iso);
-  if (!iso || isNaN(d)) return "—";
-  return new Intl.DateTimeFormat("zh-TW", {
-    timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hour12: false,
-  }).format(d).replace(/\//g, "-");
-}
-
 (async () => {
   try {
     const meta = await (await fetch("meta.json", { cache: "no-cache" })).json();
