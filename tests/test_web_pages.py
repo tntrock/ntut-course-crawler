@@ -188,3 +188,22 @@ class TestAnalytics:
         assert f"gtag('config', '{GA_MEASUREMENT_ID}')" in inline, (
             f"{page} 沒有設定 {GA_MEASUREMENT_ID}"
         )
+
+
+#: 狀態頁的「各學期資料」表把課表、教學大綱、人數快照三種資料合成一列。
+#: 少讀其中一個檔不會報錯,只會讓那一欄整排變成「—」—— 靜默失真最難發現,
+#: 所以把來源釘住。
+STATUS_SOURCES = {
+    "meta.json",
+    "syllabus.json",
+    "enrollment.json",
+    "runs.json",
+    "errors.json",
+}
+
+
+class TestStatusPageSources:
+    def test_status_page_reads_every_source_it_displays(self) -> None:
+        targets = set(FETCH_TARGET.findall(javascript("status.html")))
+        missing = STATUS_SOURCES - targets
+        assert not missing, f"狀態頁少讀了 {sorted(missing)},對應的欄位會整排變空"
