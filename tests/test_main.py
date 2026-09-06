@@ -655,3 +655,42 @@ class TestHalfCrawledSemesterIsNotPublished:
         assert errors["error_count"] == 1
         assert errors["errors"][0]["stage"] == "semester"
         assert "SiteUnavailable" in errors["errors"][0]["error"]
+
+
+class TestBackfillDoesNotDuplicateChangeEvents:
+    """回補一個歷史學期,`changes.json` 只該多一筆 baseline。
+
+    `--with-syllabus` 的流程裡,抓完課表寫一次輸出,抓完大綱又寫一次
+    (原意只是補上大綱階段新增的錯誤)。但 `changes.json` 是**追加**的,
+    於是同一件事被記了兩遍 —— 線上 11 個回補學期全部各有兩筆一模一樣的
+    baseline,只差時間戳。
+
+    歷史學期特別明顯:頂層 `index.json` 只涵蓋最新的 `INDEX_SEMESTERS`
+    個學期,回補的學期寫進去馬上又被擠掉,所以第二次仍然找不到比對基準,
+    又記一次 baseline。
+    """
+
+    def events(self, out):
+        return json.loads((out / "changes.json").read_text(encoding="utf-8"))["events"]
+
+    def test_one_baseline_per_backfilled_semester(self, tmp_path, fake_fetcher_factory):
+        out = tmp_path / "data"
+        # 先用首頁列出的兩個學期(115-1、114-2)把頂層索引佔滿,
+        # 這樣接下來回補的舊學期才會被擠出索引 —— 那正是線上的狀況。
+        main(["--all-semesters", "--out", str(out), "--log-level", "CRITICAL"])
+        main(["--years", "112", "--max-semesters", "1", "--with-syllabus",
+              "--out", str(out), "--log-level", "CRITICAL"])
+
+        index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+        assert "112-2" not in index["covers"], (
+            "這個測試的前提是回補的學期會被擠出頂層索引"
+        )
+        assert list((out / "112-2" / "syllabus").glob("*.json")), (
+            "沒抓到大綱的話就沒有走到第二次寫檔,這個測試會是空的"
+        )
+
+        baselines = [
+            e for e in self.events(out)
+            if e["type"] == "baseline" and e["semester"] == "112-2"
+        ]
+        assert len(baselines) == 1, f"記了 {len(baselines)} 筆 baseline,應該只有 1 筆"
