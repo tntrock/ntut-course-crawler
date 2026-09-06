@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>爬蟲狀態 · 北科課程資料</title>
+<meta name="description" content="北科課程資料爬蟲的執行狀態:最近幾次跑得如何、各學期資料多新、教學大綱補到哪。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<nav class="pages">
+  <a href="index.html">首頁</a>
+  <a href="status.html" aria-current="page">狀態</a>
+  <a href="errors.html">錯誤</a>
+  <a href="changes.html">異動</a>
+</nav>
+
+<h1>爬蟲狀態</h1>
+<p class="lede">
+  這頁只讀發布出去的靜態 JSON,沒有後端。
+  課程與人數每 4 小時抓一次、教學大綱一天兩次。
+</p>
+
+<div id="health" class="health unknown"><b>讀取中…</b></div>
+
+<div class="toolbar">
+  <button id="refresh" type="button">重新整理</button>
+  <span class="when" id="loaded-at"></span>
+</div>
+
+<div class="stats" id="cards"></div>
+
+<div class="note">
+  <strong>排程時間不是執行時間。</strong>GitHub Actions 只保證「不早於」,
+  這個專案實測常延遲 2~4 小時。判斷有沒有漏跑請看下面的實際執行紀錄,
+  不要拿排程時間推論。
+</div>
+
+<h2>最近的執行</h2>
+<div id="runs"><p class="empty">讀取中…</p></div>
+
+<h2>各學期資料多新</h2>
+<div id="semesters"><p class="empty">讀取中…</p></div>
+
+<h2>教學大綱進度</h2>
+<div id="syllabus"><p class="empty">讀取中…</p></div>
+
+<h2>修課人數快照</h2>
+<div id="enrollment"><p class="empty">讀取中…</p></div>
+
+<footer>
+  課程資料本身走 <a href="index.json">index.json</a> 與各學期端點,清單見
+  <a href="index.html">首頁</a>。這頁刻意不載入 index.json —— 它有 1.8 MB,
+  只為了數一個數字並不划算。 ·
+  <a href="https://github.com/tntrock/ntut-course-crawler">原始碼</a>
+</footer>
+
+</main>
+
+<script src="app.js"></script>
+<script>
+// 教學大綱回補的停損點。學校資料到 96-1 都還在,但補到 110-1 就大約 100 MB,
+// 再往前會讓 gh-pages 長到 300 MB —— 這個停損點是專案刻意選的,不是抓不到。
+const SYLLABUS_TARGET = { year: 110, sem: 1 };
+
+function statusBadge(status) {
+  const cls = status === "success" ? "ok" : status === "failure" ? "bad" : "warn";
+  const label = { success: "成功", failure: "失敗", cancelled: "被砍" }[status] || status;
+  return '<span class="badge ' + cls + '">' + esc(label) + "</span>";
+}
+
+/** 一筆執行紀錄抓了幾頁。
+ *
+ * f754d78 之前的紀錄用 `requests`,之後改成 `requests_ok` + `failed_urls` ——
+ * 舊紀錄還留在 runs.json 裡(最多 120 筆),兩種都要讀得出來。 */
+function requestCount(run) {
+  const ok = typeof run.requests_ok === "number" ? run.requests_ok : run.requests;
+  if (typeof ok !== "number") return "—";
+  const failed = run.failed_urls;
+  return num(ok) + (failed ? ' <span class="badge bad">' + num(failed) + " 失敗</span>" : "");
+}
+
+/** 這次嘗試跑了多久。舊紀錄的欄位叫 `started_at`。 */
+function runDuration(run) {
+  const from = run.attempt_started_at || run.started_at;
+  if (!from) return "—";
+  const secs = (new Date(run.at) - new Date(from)) / 1000;
+  return isFinite(secs) && secs >= 0 ? duration(secs) : "—";
+}
+
+function render() {
+  // 五個檔各抓一次,分給下面各區塊用。
+  const runs = loadJSON("runs.json");
+  const meta = loadJSON("meta.json");
+  const errors = loadJSON("errors.json");
+  const syllabus = loadJSON("syllabus.json");
+  const enrollment = loadJSON("enrollment.json");
+
+  // ---- 健康燈號 ----
+  block("health", Promise.all([runs, meta]), (node, [r, m]) => {
+    const last = (r.runs || []).find(x => x.workflow === "crawl") || (r.runs || [])[0];
+    const age = hoursSince(m.generated_at);
+    let cls = "ok", head = "✓ 正常", note = "";
+
+    if (last && last.status === "failure") {
+      cls = "bad";
+      head = "✕ 上一班失敗";
+      note = "已完成的部分仍會發布,下一班會自動接續。";
+    } else if (last && last.status === "cancelled") {
+      cls = "warn";
+      head = "! 上一班被中止";
+      note = "多半是 job 逾時,抓到一半的部分已經發布。";
+    } else if (age > 8) {
+      cls = "warn";
+      head = "! 資料延遲中";
+      note = "最新一批資料是 " + relative(m.generated_at) +
+             "。排程每 4 小時一次,實測常延遲 2~4 小時,超過 8 小時才值得看一眼。";
+    } else {
+      note = "最新一批資料是 " + relative(m.generated_at) + "。";
+    }
+    node.className = "health " + cls;
+    node.innerHTML = "<b>" + esc(head) + "</b><span>" + esc(note) + "</span>";
+  });
+
+  // ---- 數字卡 ----
+  // 用 allSettled:四張卡來自四個檔,其中一個讀不到時另外三張還是要出得來。
+  block("cards", Promise.allSettled([meta, runs, errors, syllabus]), (node, results) => {
+    const [m, r, e, s] = results.map(x => (x.status === "fulfilled" ? x.value : null));
+
+    const recent = r ? (r.runs || []).slice(0, 10) : [];
+    const ok = recent.filter(x => x.status === "success").length;
+    const rate = recent.length ? Math.round((ok / recent.length) * 100) + "%" : "—";
+
+    const frozen = s ? Object.keys(s.frozen || {}).length : null;
+
+    const cards = [
+      [m ? taipei(m.generated_at) : "—", "最新一批資料 (UTC+8)"],
+      [rate, "最近 " + (recent.length || 0) + " 次成功率"],
+      [e ? num(e.error_count) : "—", "目前抓取失敗數"],
+      [frozen === null ? "—" : num(frozen), "大綱已補完學期"],
+    ];
+    node.innerHTML = cards
+      .map(([b, label]) =>
+        '<div class="stat"><b>' + esc(b) + "</b><span>" + esc(label) + "</span></div>")
+      .join("");
+  });
+
+  // ---- 執行紀錄 ----
+  block("runs", runs, (node, r) => {
+    const list = r.runs || [];
+    if (!list.length) {
+      node.innerHTML = '<p class="empty">還沒有執行紀錄。</p>';
+      return;
+    }
+    const rows = list.map(run => {
+      const failed = (run.failed_semesters || []).length
+        ? '<span class="badge bad">未完成:' + esc(run.failed_semesters.join("、")) + "</span>"
+        : "";
+      // detail: false 是「爬蟲根本沒來得及寫側寫檔」,不是「抓了 0 頁」。
+      const detail = run.detail === false
+        ? '<span class="dim">無明細</span>'
+        : (run.semesters || []).map(s =>
+            "<div>" + esc(s.semester) + ":課程 " + num(s.courses) +
+            "、單位 " + num(s.departments_ok) +
+            (s.departments_failed ? "(失敗 " + num(s.departments_failed) + ")" : "") +
+            (s.syllabus_fetched
+              ? "、大綱抓 " + num(s.syllabus_fetched) + " 寫 " + num(s.syllabus_written)
+              : "") +
+            "、耗時 " + duration(s.seconds) + "</div>").join("") ||
+          '<span class="dim">這次沒有完成任何學期</span>';
+
+      return "<tr>" +
+        "<td>" + esc(relative(run.at)) + '<br><span class="dim">' + esc(taipei(run.at)) + "</span></td>" +
+        "<td>" + esc(run.workflow) + '<br><span class="dim">' + esc(run.event || "") + "</span></td>" +
+        "<td>" + statusBadge(run.status) +
+          (run.attempts > 1 ? ' <span class="badge plain">重試 ' + esc(run.attempts) + " 次</span>" : "") +
+          (failed ? "<br>" + failed : "") + "</td>" +
+        '<td class="num">' + esc(runDuration(run)) + "</td>" +
+        '<td class="num">' + requestCount(run) + "</td>" +
+        "<td>" + (run.url ? '<a href="' + esc(run.url) + '">紀錄</a>' : "") +
+          '<details class="row"><summary>明細</summary><div class="inner">' +
+          detail + "</div></details></td>" +
+        "</tr>";
+    }).join("");
+
+    node.innerHTML =
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>時間</th><th>工作流程</th><th>結果</th><th>耗時</th><th>抓取頁數</th><th></th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">共 ' + num(r.run_count) +
+      " 筆,保留最近 120 次。「重試」是 workflow 內部整批重跑的次數,跟 Actions 上的 re-run 不是同一件事。</p>";
+  });
+
+  // ---- 各學期資料多新 ----
+  block("semesters", meta, (node, m) => {
+    const all = (m.semesters || []).slice()
+      .sort((a, b) => semesterKey(b.path) - semesterKey(a.path));
+    if (!all.length) {
+      node.innerHTML = '<p class="empty">meta.json 裡沒有學期。</p>';
+      return;
+    }
+    const row = s => "<tr>" +
+      "<td>" + esc(s.path) + (s.path === m.latest ? ' <span class="badge ok">當期</span>' : "") + "</td>" +
+      '<td class="num">' + num(s.course_count) + "</td>" +
+      '<td class="num">' + num(s.department_count) + "</td>" +
+      "<td>" + esc(relative(s.generated_at)) + '<br><span class="dim">' + esc(taipei(s.generated_at)) + "</span></td>" +
+      "<td>" +
+        (s.partial ? '<span class="badge warn">局部抓取</span> ' : "") +
+        (s.failed_department_count
+          ? '<span class="badge bad">' + num(s.failed_department_count) + " 個單位失敗</span>"
+          : (s.partial ? "" : '<span class="badge ok">完整</span>')) +
+      "</td></tr>";
+
+    const head = '<div class="tablewrap"><table><thead><tr>' +
+      "<th>學期</th><th>課程</th><th>單位</th><th>資料時間</th><th></th>" +
+      "</tr></thead><tbody>";
+    const recent = all.slice(0, 6).map(row).join("");
+    const rest = all.slice(6);
+
+    node.innerHTML = head + recent + "</tbody></table></div>" +
+      (rest.length
+        ? '<details class="row"><summary>其餘 ' + rest.length +
+          ' 個歷史學期</summary><div class="tablewrap"><table><tbody>' +
+          rest.map(row).join("") + "</tbody></table></div></details>"
+        : "");
+  });
+
+  // ---- 教學大綱進度 ----
+  block("syllabus", syllabus, (node, s) => {
+    const entries = (s.semesters || []).slice()
+      .sort((a, b) => semesterKey(b.semester) - semesterKey(a.semester));
+    const frozen = s.frozen || {};
+
+    const live = entries.filter(e => !e.frozen).map(e => {
+      const pct = e.with_url ? Math.round((e.fetched / e.with_url) * 100) : 0;
+      return "<p><strong>" + esc(e.semester) + "</strong> 當期 · " +
+        num(e.fetched) + " / " + num(e.with_url) + " 份(" + pct + "%)" +
+        '</p><div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '<p class="dim" style="font-size:.85rem">最後一次抓取 ' +
+        esc(taipei(e.newest_fetch)) + "。每天兩班會整批重抓,但內容沒變的不會重寫檔案。</p>";
+    }).join("");
+
+    const doneKeys = Object.keys(frozen).sort((a, b) => semesterKey(b) - semesterKey(a));
+    const done = doneKeys.length
+      ? '<p>已補完並收合:' + doneKeys.map(k =>
+          '<span class="badge ok">' + esc(k) + " " + num(frozen[k].fetched) + " 份</span>"
+        ).join(" ") + "</p>"
+      : "";
+
+    // 還沒補的:從當期往前數到停損點,扣掉已收合與當期。
+    const covered = new Set(doneKeys.concat(entries.map(e => e.semester)));
+    const todo = [];
+    const newest = entries.length ? entries[0].semester : null;
+    if (newest) {
+      for (let y = Number(newest.split("-")[0]); y >= SYLLABUS_TARGET.year; y--) {
+        for (const sem of [2, 1]) {
+          const key = y + "-" + sem;
+          if (semesterKey(key) > semesterKey(newest)) continue;
+          if (y === SYLLABUS_TARGET.year && sem < SYLLABUS_TARGET.sem) continue;
+          if (!covered.has(key)) todo.push(key);
+        }
+      }
+    }
+    const pending = todo.length
+      ? "<p>還沒補(回補到 " + SYLLABUS_TARGET.year + "-" + SYLLABUS_TARGET.sem +
+        " 為止):" + todo.map(k => '<span class="badge plain">' + esc(k) + "</span>").join(" ") +
+        "</p>"
+      : "<p>回補已完成到 " + SYLLABUS_TARGET.year + "-" + SYLLABUS_TARGET.sem + "。</p>";
+
+    node.innerHTML = (live || "") + done + pending;
+  });
+
+  // ---- 人數快照 ----
+  block("enrollment", enrollment, (node, e) => {
+    const snaps = e.snapshots || [];
+    if (!snaps.length) {
+      node.innerHTML = '<p class="empty">還沒有人數快照。</p>';
+      return;
+    }
+    const rows = snaps.map(s => "<tr>" +
+      "<td>" + esc(s.date) + "</td>" +
+      "<td>" + esc(s.semester) + "</td>" +
+      '<td class="num">' + num(s.enrolled_total) + "</td>" +
+      '<td class="num">' + num(s.withdrawn_total) + "</td>" +
+      '<td class="num">' + num(s.course_count) + "</td>" +
+      "<td>" + (s.path ? '<a href="' + esc(s.path) + '">逐課</a>' : "") + "</td>" +
+      "</tr>").join("");
+
+    node.innerHTML =
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>日期</th><th>學期</th><th>修課人次</th><th>撤選</th><th>課程</th><th></th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">日期是台北時區,執行時間是 UTC ——' +
+      "跨日的邊界上兩者可能差一天。</p>";
+  });
+}
+
+boot(render);
+</script>
+</body>
+</html>

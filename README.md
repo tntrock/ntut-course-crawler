@@ -75,6 +75,11 @@ https://tntrock.github.io/ntut-course-crawler/
 
 > 根目錄 `/` 是一頁靜態說明頁。要拿最新兩個學期的索引請明確打 `/index.json`。
 
+同一組資料另外有三頁給人看的：`/status.html`（爬蟲跑得如何、各學期資料多新、
+大綱補到哪、人數快照）、`/errors.html`（目前抓不到的單位與課程）、
+`/changes.html`（最近的加開、停開、調課與教師異動）。
+它們只讀上表這些 JSON，沒有後端 —— 你自己也可以照樣讀。
+
 **明細檔**（`courses/` `teachers/` `classes/`）放完整課程物件，拿到就能直接顯示，
 不必再載別的檔對照。**清單檔**（`teachers.json` `classes.json` …）只放
 「有哪些、各幾門課」，做下拉選單時不會被整包資料拖慢。
@@ -1186,7 +1191,10 @@ scripts/            # 一次性的偵察腳本(recon*.py),不參與正式流程,
                     # 留著是為了保存「當初怎麼確認的」這件事
 .github/workflows/  # crawl(每 4 小時)、syllabus(一天兩班)、
                     # backfill(手動回補)、test(每次 push)
-web/index.html      # 發布到 gh-pages 根目錄的說明頁,由 workflow 複製過去
+web/                # 發布到 gh-pages 根目錄的頁面,整個目錄由 workflow 複製過去
+                    # index.html(說明)、status.html(爬蟲狀態)、
+                    # errors.html(抓取失敗)、changes.html(課程異動)、
+                    # 加上共用的 style.css 與 app.js
 ```
 
 解析器一律是**純函式**：吃 HTML 字串 → 吐 dataclass，不發網路請求。
