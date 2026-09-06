@@ -34,6 +34,7 @@ from .output import (
     syllabus_done_semesters,
     read_syllabus_frozen,
     read_syllabus_state,
+    write_errors,
     write_outputs,
     write_semester_failure,
     write_syllabus,
@@ -811,8 +812,14 @@ def main(argv: list[str] | None = None) -> int:
                     refresh_after=args.syllabus_refresh_after,
                     pretty=args.pretty,
                 )
-                # 大綱抓完可能新增了錯誤,重寫一次 errors.json
-                write_outputs(result, args.out, pretty=args.pretty)
+                # 大綱抓完可能新增了錯誤,重寫一次 errors.json。
+                #
+                # **只寫 errors.json,不要整套重跑。** 早先這裡是再呼叫一次
+                # write_outputs(),但它連 changes.json 也一起重寫,而那個檔
+                # 是追加語義 —— 於是同一個學期的 baseline 被記了兩遍,只差
+                # 時間戳。回補的歷史學期尤其明顯:它寫進頂層索引後馬上又被
+                # 擠出涵蓋範圍,所以第二次仍然找不到比對基準,再記一次。
+                write_errors(result, args.out, pretty=args.pretty)
 
         snapshot()
 

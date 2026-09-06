@@ -129,7 +129,7 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_changes(result, out_dir, pretty)
     _write_index(result, out_dir, pretty)
     _write_meta(result, out_dir, pretty)
-    _write_errors(result, out_dir, pretty)
+    write_errors(result, out_dir, pretty)
 
 
 def _clean_rebuilt_dirs(semester_dir: Path) -> None:
@@ -1301,8 +1301,13 @@ def _endpoint_table() -> list[dict[str, str]]:
     ]
 
 
-def _write_errors(result: "CrawlResult", out_dir: Path, pretty: bool) -> None:
+def write_errors(result: "CrawlResult", out_dir: Path, pretty: bool = False) -> None:
     """沒有錯誤時也要寫,不然使用者會看到上一輪殘留的錯誤檔。
+
+    是公開的,因為抓完教學大綱之後要單獨再寫一次 —— 大綱階段可能新增
+    錯誤,但那時**只有這個檔需要更新**。不要改回呼叫 `write_outputs()`:
+    它會連 `changes.json` 一起重跑,而那個檔是追加語義,於是同一筆
+    baseline 會被記兩遍。
 
     多學期一起跑時,只替換本學年期的錯誤,其他學期的保留。
     """
@@ -1357,7 +1362,7 @@ def write_semester_failure(
     於是永遠不會重試。errors.json 是「這次發生什麼事」,meta.json 是
     「我手上有什麼資料」,兩者不能混。
 
-    下次同一個學期抓成功時,`_write_errors` 會依 (year, sem) 換掉這筆。
+    下次同一個學期抓成功時,`write_errors` 會依 (year, sem) 換掉這筆。
     """
     path = Path(out_dir) / "errors.json"
     existing = _read_json(path) or {}
