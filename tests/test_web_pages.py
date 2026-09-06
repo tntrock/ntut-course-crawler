@@ -102,6 +102,10 @@ def javascript(page: str) -> str:
     markup = parse(page)
     sources = list(markup.inline_scripts)
     for src in markup.script_srcs:
+        # 外部來源(分析工具之類)不是我們寫的程式碼,掃它沒有意義 ——
+        # 而且把絕對網址當成 web/ 底下的路徑去讀會直接炸掉。
+        if src.startswith(("http://", "https://", "//")):
+            continue
         sources.append((WEB_DIR / src).read_text(encoding="utf-8"))
     return "\n".join(sources)
 
@@ -161,3 +165,26 @@ class TestPublishing:
         """複製整個目錄,而不是逐檔列名 —— 逐檔列的話,下次加頁必定漏掉一支。"""
         text = (WORKFLOW_DIR / workflow).read_text(encoding="utf-8")
         assert re.search(r"cp\s+-R\s+web/\.\s+data/", text), f"{workflow} 沒有發布 web/"
+
+
+#: Google Analytics 的評估 ID。四個頁面都要帶 —— 少一頁不會有任何錯誤訊息,
+#: 只是那頁的流量從此不見。
+GA_MEASUREMENT_ID = "G-SJF3YWLFMQ"
+
+
+class TestAnalytics:
+    @pytest.mark.parametrize("page", PAGES)
+    def test_every_page_loads_the_analytics_tag(self, page: str) -> None:
+        srcs = parse(page).script_srcs
+        assert any(
+            "googletagmanager.com/gtag/js" in src and GA_MEASUREMENT_ID in src
+            for src in srcs
+        ), f"{page} 沒有載入 gtag"
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_every_page_configures_the_same_property(self, page: str) -> None:
+        """ID 打錯會讓流量進到別的資源,而且同樣不會有錯誤訊息。"""
+        inline = "\n".join(parse(page).inline_scripts)
+        assert f"gtag('config', '{GA_MEASUREMENT_ID}')" in inline, (
+            f"{page} 沒有設定 {GA_MEASUREMENT_ID}"
+        )
