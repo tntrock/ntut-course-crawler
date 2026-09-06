@@ -190,9 +190,13 @@ jobs:
       # 1.5 MB 的 index.json 吐給訪客 —— 那不是給人看的東西。
       # 用 keep_files 發布,所以這個檔在兩支 workflow 之間會一直留著,
       # 但兩邊都複製一份比較保險(rebuild 會把根目錄清掉重來)。
-      - name: Add landing page
+      #
+      # 複製整個 web/ 而不是逐檔列名:首頁之外還有狀態 / 錯誤 / 異動三頁
+      # 與它們共用的 style.css、app.js,逐檔列的話下次加頁一定會漏掉某一支,
+      # 而且漏掉時 repo 裡有檔、線上沒有,本機怎麼測都是好的。
+      - name: Add landing pages
         if: always()
-        run: cp web/index.html data/index.html
+        run: cp -R web/. data/
 
       - name: Upload data as artifact
         if: always()

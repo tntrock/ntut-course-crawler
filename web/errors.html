@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>抓取失敗 · 北科課程資料</title>
+<meta name="description" content="北科課程資料爬蟲目前抓不到的單位、班級與教學大綱。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<nav class="pages">
+  <a href="index.html">首頁</a>
+  <a href="status.html">狀態</a>
+  <a href="errors.html" aria-current="page">錯誤</a>
+  <a href="changes.html">異動</a>
+</nav>
+
+<h1>抓取失敗</h1>
+<p class="lede">
+  這裡列的是<strong>目前這一份資料裡缺了什麼</strong>,不是歷史錯誤紀錄。
+  同一個學期下次抓成功時,它的錯誤就會整批被換掉。
+</p>
+
+<div class="toolbar">
+  <button id="refresh" type="button">重新整理</button>
+  <span class="when" id="loaded-at"></span>
+</div>
+
+<div id="summary"></div>
+<div id="errors"><p class="empty">讀取中…</p></div>
+
+<div class="note">
+  <strong>抓不到不一定是學校壞了。</strong>實測遇過 GitHub runner 連不到學校
+  (<code>ConnectTimeoutError</code>)、但同一個網址從台灣打是正常的 ——
+  那是跨境路由問題。失敗的單位下一班會自動重試,不需要做什麼。
+</div>
+
+<footer>
+  原始資料:<a href="errors.json">errors.json</a> ·
+  歷次執行的成敗看 <a href="status.html">狀態頁</a> ·
+  <a href="https://github.com/tntrock/ntut-course-crawler">原始碼</a>
+</footer>
+
+</main>
+
+<script src="app.js"></script>
+<script>
+// 錯誤發生在哪一層。爬蟲是逐層往下抓的:單位 → 班級 → 課程大綱,
+// 掛在哪一層決定了少掉多少資料,所以分開列而不是混成一張表。
+const STAGES = {
+  semester: { label: "整個學期", hint: "這個學期完全抓不到,下次執行會重試。" },
+  department: { label: "系所單位", hint: "這個單位的課全部沒抓到。" },
+  class_group: { label: "班級", hint: "單位有抓到,但這個班級的課表沒抓到。" },
+  syllabus: { label: "教學大綱", hint: "課程資料正常,只有大綱內容沒抓到。" },
+};
+
+function describe(e) {
+  if (e.stage === "class_group") {
+    return esc(e.department_name) + " · " + esc(e.class_group_name) +
+      ' <span class="dim">(' + esc(e.class_group_id) + ")</span>";
+  }
+  if (e.stage === "department") {
+    return esc(e.department_name) + ' <span class="dim">(' + esc(e.department_id) + ")</span>";
+  }
+  if (e.stage === "syllabus") {
+    return esc(e.course_name) + ' <span class="dim">(' + esc(e.course_id) + ")</span>";
+  }
+  return '<span class="dim">整個學期</span>';
+}
+
+function render() {
+  const errors = loadJSON("errors.json");
+
+  block("summary", errors, (node, d) => {
+    const total = d.error_count || 0;
+    node.innerHTML = total === 0
+      ? '<div class="health ok"><b>✓ 目前沒有抓取失敗</b><span>資料產生於 ' +
+        esc(taipei(d.generated_at)) + "</span></div>"
+      : '<div class="health bad"><b>✕ ' + num(total) + " 筆抓取失敗</b><span>資料產生於 " +
+        esc(taipei(d.generated_at)) + "</span></div>";
+  });
+
+  block("errors", errors, (node, d) => {
+    const list = d.errors || [];
+    if (!list.length) {
+      // 空表格會讓人分不出「沒有錯誤」和「讀不到資料」,所以明講。
+      node.innerHTML = '<p class="empty">沒有任何單位或課程抓取失敗。</p>';
+      return;
+    }
+
+    // 先依學期分組,再依層級分組。
+    const bySemester = new Map();
+    for (const e of list) {
+      const key = e.year + "-" + e.sem;
+      if (!bySemester.has(key)) bySemester.set(key, []);
+      bySemester.get(key).push(e);
+    }
+
+    const html = [...bySemester.keys()]
+      .sort((a, b) => semesterKey(b) - semesterKey(a))
+      .map(sem => {
+        const group = bySemester.get(sem);
+        const stages = Object.keys(STAGES)
+          .map(stage => {
+            const rows = group.filter(e => e.stage === stage);
+            if (!rows.length) return "";
+            const info = STAGES[stage];
+            return "<h3 style=\"font-size:.95rem;margin:1.25rem 0 .4rem\">" +
+              esc(info.label) + ' <span class="badge bad">' + rows.length + "</span>" +
+              '</h3><p class="dim" style="font-size:.85rem;margin:0 0 .4rem">' +
+              esc(info.hint) + "</p>" +
+              '<div class="tablewrap"><table><thead><tr>' +
+              "<th>對象</th><th>錯誤</th><th></th></tr></thead><tbody>" +
+              rows.map(e => "<tr><td>" + describe(e) + "</td>" +
+                '<td><code>' + esc(e.error) + "</code></td>" +
+                "<td>" + (e.url ? '<a href="' + esc(e.url) + '">學校原頁</a>' : "") + "</td></tr>"
+              ).join("") +
+              "</tbody></table></div>";
+          }).join("");
+
+        // 認得的層級以外的一律另外列出來,不要靜靜吞掉。
+        const known = new Set(Object.keys(STAGES));
+        const others = group.filter(e => !known.has(e.stage));
+        const extra = others.length
+          ? "<h3 style=\"font-size:.95rem;margin:1.25rem 0 .4rem\">其他</h3>" +
+            '<div class="tablewrap"><table><tbody>' +
+            others.map(e => "<tr><td>" + esc(e.stage) + "</td><td><code>" +
+              esc(e.error) + "</code></td></tr>").join("") +
+            "</tbody></table></div>"
+          : "";
+
+        return "<h2>" + esc(sem) + '<span class="badge bad" style="margin-left:.5rem">' +
+          group.length + " 筆</span></h2>" + stages + extra;
+      }).join("");
+
+    node.innerHTML = html;
+  });
+}
+
+boot(render);
+</script>
+</body>
+</html>
