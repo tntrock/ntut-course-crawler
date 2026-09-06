@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0
+# 只有測試用得到:tests/test_workflow_schedule.py 解析 .github/workflows/
+# 來確認排程與守門條件還在。爬蟲本身不碰 YAML,所以不進 requirements.txt。
+PyYAML>=6.0
