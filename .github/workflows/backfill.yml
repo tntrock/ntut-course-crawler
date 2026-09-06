@@ -16,6 +16,18 @@ name: backfill
 # 學年度就是極限,再往前沒有東西可補。
 
 on:
+  # 每 6 小時醒來一次,把剩下的學期一批一批補完,不必有人守在線上按。
+  #
+  # 一批 6 個學期在 delay=0.5 下約 3.1 小時,間隔 6 小時等於每個循環仍留
+  # 2.8 小時給例行的 crawl —— 加退選期間的人數資料才不會被回補整個餓死。
+  #
+  # 刻意錯開 crawl 的整點排程(它是 `0 */4`):兩者共用 concurrency 群組,
+  # 同一時刻送出時後到的會把待命中的那個擠掉,錯開就少踩到。
+  #
+  # 補完之後這個排程會空轉 —— 下面的 `remaining` 守門會讓它什麼都不做就結束。
+  # 確定補完了(syllabus.json 的 frozen 含 96-1)就可以把這段拿掉。
+  schedule:
+    - cron: '30 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
       years:
@@ -48,6 +60,17 @@ jobs:
   backfill:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    # 排程觸發時 inputs 全是空的,所以兩種來源在這裡明確分流。
+    #
+    # **不要**改寫成 `inputs.x || 預設值`。手動 dispatch 時如果把某個
+    # boolean 取消勾選,它的值是 false,那種寫法會讀成「沒給」而套用預設,
+    # 於是使用者明確關掉的選項又被打開 —— 安靜地做了沒被要求的事。
+    env:
+      YEARS: ${{ github.event_name == 'schedule' && '96-113' || inputs.years }}
+      WITH_SYLLABUS: ${{ github.event_name == 'schedule' && 'true' || inputs.with_syllabus }}
+      DELAY: ${{ github.event_name == 'schedule' && '0.5' || inputs.delay }}
+      MAX_SEMESTERS: ${{ github.event_name == 'schedule' && '6' || inputs.max_semesters }}
+      ALL_SEMESTERS: ${{ github.event_name == 'schedule' && 'false' || inputs.all_semesters }}
     steps:
       - uses: actions/checkout@v7
 
@@ -106,6 +129,36 @@ jobs:
             echo "尚無任何學期資料"
           fi
 
+      # 還有沒有學期要補?排程每 6 小時醒來一次,補完之後就沒事做了。
+      #
+      # 判斷直接呼叫爬蟲自己選學期的那個函式,不在這裡用 bash 重寫一套 ——
+      # 兩份邏輯遲早會漂移,而漂移的後果是「明明還沒補完卻跳過」。
+      #
+      # 沒事做時後面每一步都會跳過。**Record this run 尤其不能跑**:
+      # runs.json 只保留最近 120 筆,一天 4 筆空紀錄幾天就會把真正的
+      # 執行紀錄整個擠光,狀態頁跟著失真。
+      - name: Anything left to backfill?
+        id: remaining
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from crawler.main import backfill_semesters, parse_year_range
+
+          picked = backfill_semesters(
+              parse_year_range(os.environ["YEARS"]),
+              Path("data"),
+              need_syllabus=os.environ["WITH_SYLLABUS"] == "true",
+          )
+          for semester, reason in picked:
+              print(f"待處理 {semester.path}({reason})")
+          print(f"還有 {len(picked)} 個學期要處理")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"count={len(picked)}\n")
+          PY
+
       # 失敗就等 30 分鐘整批重來,最多 3 次。跟 crawl / syllabus 同一套理由:
       # crawler 內部的重試治得了線路抖動,治不了學校端幾十分鐘的中斷。
       # 重試很便宜 —— .cache/ 在同一個 job 內共用,已經抓好的頁面不會再打一次,
@@ -114,12 +167,8 @@ jobs:
       # 回補本來就是可以分批的:中途放棄不會弄壞任何東西,已經補完的學期
       # 下一次執行會自動跳過,再按一次就接著跑。
       - name: Backfill
+        if: steps.remaining.outputs.count != '0'
         env:
-          YEARS: ${{ inputs.years }}
-          MAX_SEMESTERS: ${{ inputs.max_semesters }}
-          DELAY: ${{ inputs.delay }}
-          ALL_SEMESTERS: ${{ inputs.all_semesters }}
-          WITH_SYLLABUS: ${{ inputs.with_syllabus }}
           MAX_ATTEMPTS: '3'
           RETRY_WAIT_SECONDS: '1800'
         run: |
@@ -170,7 +219,7 @@ jobs:
       # 狀態從 job.status 拿而不是由爬蟲自己寫,因為最需要紀錄的那幾次
       # (逾時被砍、整批重試用完)爬蟲根本沒機會寫任何東西。
       - name: Record this run
-        if: always()
+        if: always() && steps.remaining.outputs.count != '0'
         run: |
           python -m crawler.runlog --out data/ \
             --status "${{ job.status }}" \
@@ -184,11 +233,11 @@ jobs:
       # 複製整個 web/:首頁之外還有狀態 / 錯誤 / 異動三頁與共用的資產,
       # 逐檔列名的話下次加頁一定會漏掉某一支。
       - name: Add landing pages
-        if: always()
+        if: always() && steps.remaining.outputs.count != '0'
         run: cp -R web/. data/
 
       - name: Upload data as artifact
-        if: always()
+        if: always() && steps.remaining.outputs.count != '0'
         uses: actions/upload-artifact@v7
         with:
           name: backfill-${{ github.run_id }}
@@ -203,7 +252,7 @@ jobs:
       # 被砍在寫到一半也不會留下截斷的 JSON。
       # keep_files:只加上這批新抓的學期,不動已經在分支上的其他資料
       - name: Publish to gh-pages
-        if: always()
+        if: always() && steps.remaining.outputs.count != '0'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

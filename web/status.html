@@ -129,7 +129,9 @@ function render() {
   block("cards", Promise.allSettled([meta, runs, errors, syllabus]), (node, results) => {
     const [m, r, e, s] = results.map(x => (x.status === "fulfilled" ? x.value : null));
 
-    const recent = r ? (r.runs || []).slice(0, 10) : [];
+    // runs.json 最多留 120 筆,取 100 筆等於「幾乎全部」—— 成功率因此
+    // 反映的是一段長期趨勢,不會被最近一兩次失敗拉到很難看。
+    const recent = r ? (r.runs || []).slice(0, 100) : [];
     const ok = recent.filter(x => x.status === "success").length;
     const rate = recent.length ? Math.round((ok / recent.length) * 100) + "%" : "—";
 
