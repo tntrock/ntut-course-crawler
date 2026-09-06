@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>課程異動 · 北科課程資料</title>
+<meta name="description" content="北科課程資料最近偵測到的加開、停開、調課與教師異動。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<nav class="pages">
+  <a href="index.html">首頁</a>
+  <a href="status.html">狀態</a>
+  <a href="errors.html">錯誤</a>
+  <a href="changes.html" aria-current="page">異動</a>
+</nav>
+
+<h1>課程異動</h1>
+<p class="lede">
+  每次抓取都拿新資料跟上一輪的索引比對,有變才記一筆。最新的在最前面。
+</p>
+
+<div id="summary"></div>
+
+<div class="toolbar">
+  <label>學期 <select id="f-semester"><option value="">全部</option></select></label>
+  <label>類型 <select id="f-type"><option value="">全部</option></select></label>
+  <span class="grow"></span>
+  <button id="refresh" type="button">重新整理</button>
+  <span class="when" id="loaded-at"></span>
+</div>
+
+<div id="events"><p class="empty">讀取中…</p></div>
+
+<div class="note">
+  <strong>人數變動不在這裡。</strong>加退選期間每 4 小時就有上千門課的人數在動,
+  放進來會把真正的結構性異動(加開、停開、調課、換老師)整個淹掉。
+  人數的時間軸走 <a href="enrollment.json">enrollment.json</a>,摘要在
+  <a href="status.html">狀態頁</a>。
+</div>
+
+<footer>
+  原始資料:<a href="changes.json">changes.json</a> ·
+  <a href="https://github.com/tntrock/ntut-course-crawler">原始碼</a>
+</footer>
+
+</main>
+
+<script src="app.js"></script>
+<script>
+const TYPES = {
+  course_added: { label: "加開", cls: "ok" },
+  course_removed: { label: "停開", cls: "bad" },
+  course_changed: { label: "內容變更", cls: "warn" },
+  teacher_added: { label: "教師加入", cls: "ok" },
+  teacher_removed: { label: "教師離開", cls: "bad" },
+  bulk_change: { label: "整批異動", cls: "warn" },
+  baseline: { label: "基準點", cls: "plain" },
+};
+
+// course_changed 會列出改了哪些欄位。這些就是有在比對的欄位,
+// 刻意不含人數 —— 理由見頁面下方的說明。
+const FIELDS = {
+  name_zh: "課程名稱",
+  teachers: "授課教師",
+  time_slots: "上課時間",
+  credits: "學分",
+  required: "必選修",
+  requirement_type: "必選修類別",
+  department_ids: "開課單位",
+  class_ids: "修課班級",
+  language: "授課語言",
+};
+
+const DAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
+
+/** 上課時間 {day, day_name, periods} → 「週三 5、6 節」。
+ *
+ * 這頁的重點就是把事件講成人話,調課是最常看的一種異動,吐原始 JSON
+ * 等於要讀的人自己在腦子裡解析。day_name 是爬蟲寫出來的,舊資料沒有的話
+ * 用 day 補。 */
+function timeSlot(slot) {
+  const day = slot.day_name || DAY_NAMES[slot.day] || slot.day;
+  const periods = (slot.periods || []).join("、");
+  return "週" + day + (periods ? " " + periods + " 節" : "");
+}
+
+/** 欄位值可能是字串、數字、陣列,也可能是 time_slots 那種物件陣列。 */
+function value(v) {
+  if (v === null || v === undefined || v === "") return "(空)";
+  if (Array.isArray(v)) {
+    if (!v.length) return "(空)";
+    return v.map(x => {
+      if (x && typeof x === "object") {
+        return "periods" in x ? timeSlot(x) : JSON.stringify(x);
+      }
+      return String(x);
+    }).join("、");
+  }
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function tally(obj, limit) {
+  const keys = Object.keys(obj || {});
+  if (!keys.length) return "(無)";
+  return keys.slice(0, limit)
+    .map(k => esc(k) + " " + num(obj[k]))
+    .join("、") + (keys.length > limit ? " …" : "");
+}
+
+/** 一筆事件渲染成一句人話。 */
+function describe(e) {
+  if (e.type === "baseline") {
+    // 回補歷史學期時沒有可比對的基準。標清楚,免得被當成一次加開三千門課。
+    return "<b>" + esc(e.semester) + " 建立比對基準</b>(" + num(e.course_count) +
+      ' 門課)<div class="dim">回補歷史學期時沒有前一輪可比,這不是異動。</div>';
+  }
+
+  if (e.type === "bulk_change") {
+    const counts = Object.keys(e.counts || {})
+      .map(k => (TYPES[k] ? TYPES[k].label : k) + " " + num(e.counts[k])).join("、");
+    const samples = (e.samples || []).slice(0, 5)
+      .map(s => "<li>" + (TYPES[s.type] ? esc(TYPES[s.type].label) : esc(s.type)) + " · " +
+        esc(s.name || s.id) + "</li>").join("");
+    return "<b>整批異動 " + num(e.event_count) + " 筆</b>(" + esc(counts) + ")" +
+      '<div class="dim">依單位:' + tally(e.by_department, 10) + "</div>" +
+      '<div class="dim">依班級:' + tally(e.by_class, 8) + "</div>" +
+      (samples ? "<ul style=\"margin:.4rem 0 0 1.1rem;padding:0\">" + samples + "</ul>" : "") +
+      '<div class="dim" style="margin-top:.3rem">集中在少數幾個單位通常是學校開了一批課;' +
+      "散落在幾十個單位則多半是版面改了或抓歪了。</div>";
+  }
+
+  if (e.type === "teacher_added" || e.type === "teacher_removed") {
+    const verb = e.type === "teacher_added" ? "這學期開始有課" : "這學期沒有課了";
+    return "<b>" + esc(e.name) + "</b> " + verb +
+      "(" + num(e.course_count) + " 門)" +
+      (e.department_ids && e.department_ids.length
+        ? '<div class="dim">單位:' + esc(e.department_ids.join("、")) + "</div>" : "") +
+      '<div class="dim">換人授課時課還在,只有教師這一端看得出來。</div>';
+  }
+
+  const who = (e.teachers && e.teachers.length) ? e.teachers.join("、") : "未列教師";
+  const head = "<b>" + esc(e.name || e.id) + '</b> <span class="dim">' + esc(e.id) +
+    "</span><div class=\"dim\">" + esc(who) +
+    (e.class_ids && e.class_ids.length ? " · 班級 " + esc(e.class_ids.join("、")) : "") +
+    "</div>";
+
+  if (e.type === "course_changed" && e.changes) {
+    const rows = Object.keys(e.changes).map(f =>
+      "<li>" + esc(FIELDS[f] || f) + ":" +
+      '<span class="dim">' + esc(value(e.changes[f].from)) + "</span> → " +
+      esc(value(e.changes[f].to)) + "</li>").join("");
+    return head + "<ul style=\"margin:.35rem 0 0 1.1rem;padding:0\">" + rows + "</ul>";
+  }
+  return head;
+}
+
+function render() {
+  const changes = loadJSON("changes.json");
+
+  block("summary", changes, (node, d) => {
+    // checked_at 每次執行都更新,events 只有真的有異動才長 ——
+    // 分得出「學校沒動」和「爬蟲好幾天沒跑」。
+    const count = d.event_count || 0;
+    node.innerHTML =
+      '<div class="health ' + (count ? "ok" : "unknown") + '"><b>' +
+      (count ? num(count) + " 筆異動" : "目前沒有記錄到異動") +
+      "</b><span>最後比對於 " + esc(taipei(d.checked_at || d.generated_at)) +
+      "(" + esc(relative(d.checked_at || d.generated_at)) + ")</span></div>";
+  });
+
+  block("events", changes, (node, d) => {
+    const all = d.events || [];
+    if (!all.length) {
+      node.innerHTML = '<p class="empty">還沒有記錄到任何異動。' +
+        "學校沒動資料的時候這裡就是空的 —— 上面的比對時間才是爬蟲有沒有在跑的依據。</p>";
+      return;
+    }
+
+    const semesterPicker = byId("f-semester");
+    const typePicker = byId("f-type");
+    // 每次重新整理都重建選項,但保住使用者已經選的值。
+    const keepSem = semesterPicker.value, keepType = typePicker.value;
+    // 事件是照時間排的,學期選單照學期由新到舊排才找得到東西。
+    const semesters = [...new Set(all.map(e => e.semester))]
+      .sort((a, b) => semesterKey(b) - semesterKey(a));
+    const types = [...new Set(all.map(e => e.type))];
+    semesterPicker.innerHTML = '<option value="">全部</option>' +
+      semesters.map(s => '<option value="' + esc(s) + '">' + esc(s) + "</option>").join("");
+    typePicker.innerHTML = '<option value="">全部</option>' +
+      types.map(t => '<option value="' + esc(t) + '">' +
+        esc(TYPES[t] ? TYPES[t].label : t) + "</option>").join("");
+    if (semesters.includes(keepSem)) semesterPicker.value = keepSem;
+    if (types.includes(keepType)) typePicker.value = keepType;
+
+    const draw = () => {
+      const sem = semesterPicker.value, type = typePicker.value;
+      const rows = all.filter(e =>
+        (!sem || e.semester === sem) && (!type || e.type === type));
+      if (!rows.length) {
+        node.innerHTML = '<p class="empty">這個條件下沒有事件。</p>';
+        return;
+      }
+      node.innerHTML = '<ul class="events">' + rows.map(e => {
+        const info = TYPES[e.type] || { label: e.type, cls: "plain" };
+        return '<li><div class="meta">' +
+          '<span class="badge ' + info.cls + '">' + esc(info.label) + "</span> " +
+          esc(e.semester) + " · " + esc(relative(e.at)) +
+          ' <span class="dim">' + esc(taipei(e.at)) + "</span></div>" +
+          '<div class="what">' + describe(e) + "</div></li>";
+      }).join("") + "</ul>" +
+        '<p class="dim" style="font-size:.85rem">顯示 ' + rows.length + " / " +
+        all.length + " 筆。事件流有上限,太舊的會被擠掉。</p>";
+    };
+
+    semesterPicker.onchange = draw;
+    typePicker.onchange = draw;
+    draw();
+  });
+}
+
+boot(render);
+</script>
+</body>
+</html>

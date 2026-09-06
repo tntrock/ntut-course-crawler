@@ -1,0 +1,151 @@
+/* 四個發布頁共用的樣式。
+ *
+ * 原本內嵌在 index.html 裡,狀態 / 錯誤 / 異動三頁加進來之後抽成一份 ——
+ * 配色改一次就四頁一起改,不用四個檔各改一遍。
+ *
+ * 由 workflow 的 `cp -R web/. data/` 一併發布,所以頁面用相對路徑引用。 */
+
+:root {
+  color-scheme: light dark;
+  --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b675f; --line: #e3ded4;
+  --card: #ffffff; --accent: #8a5a2b; --code-bg: #f2efe9;
+  --ok: #2f6f43; --warn: #8a6a1f; --bad: #a33a2a;
+  --ok-bg: #e9f3ec; --warn-bg: #f7f0dc; --bad-bg: #f8ebe8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171614; --fg: #eae7e1; --muted: #9c968a; --line: #33302b;
+    --card: #201e1b; --accent: #d9a066; --code-bg: #262320;
+    --ok: #7cc492; --warn: #d9b45f; --bad: #e08a78;
+    --ok-bg: #1b2a20; --warn-bg: #2b2618; --bad-bg: #2c1e1b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2.5rem 1.25rem 4rem;
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.7 system-ui, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+}
+main { max-width: 52rem; margin: 0 auto; }
+h1 { font-size: 1.7rem; margin: 0 0 .3rem; letter-spacing: -.01em; }
+h2 { font-size: 1.1rem; margin: 2.5rem 0 .75rem; }
+p { margin: .5rem 0; }
+.lede { color: var(--muted); margin-bottom: 1.5rem; }
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; font-size: .89em; }
+pre {
+  background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px;
+  overflow-x: auto; font-size: .85rem; line-height: 1.6;
+}
+pre code { background: none; padding: 0; }
+.note {
+  border-left: 3px solid var(--accent); background: var(--card);
+  padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
+  font-size: .93rem;
+}
+.stats { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+.stat {
+  flex: 1 1 8rem; background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: .8rem 1rem;
+}
+.stat b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: .8rem; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: .82rem; }
+td:first-child { white-space: nowrap; }
+footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+         color: var(--muted); font-size: .87rem; }
+
+/* ---- 以下是狀態 / 錯誤 / 異動三頁加進來的 ---- */
+
+/* 導覽列。四頁互連,少一條連結那一頁就只有知道網址的人找得到。 */
+nav.pages {
+  display: flex; flex-wrap: wrap; gap: .4rem 1rem;
+  margin-bottom: 1.75rem; padding-bottom: .75rem;
+  border-bottom: 1px solid var(--line); font-size: .9rem;
+}
+nav.pages a { text-decoration: none; }
+nav.pages a:hover { text-decoration: underline; }
+nav.pages a[aria-current="page"] { color: var(--fg); font-weight: 600; }
+
+/* 健康燈號。顏色只是輔助 —— 文字本身就要說得清楚,色盲與純文字瀏覽
+ * 器都得看得懂,所以每個狀態都配一個符號而不是只換顏色。 */
+.health {
+  display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+  border: 1px solid var(--line); border-left-width: 4px;
+  background: var(--card); border-radius: 0 8px 8px 0;
+  padding: .9rem 1rem; margin: 1.25rem 0;
+}
+.health b { font-size: 1.05rem; }
+.health span { color: var(--muted); font-size: .9rem; }
+.health.ok { border-left-color: var(--ok); background: var(--ok-bg); }
+.health.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.health.bad { border-left-color: var(--bad); background: var(--bad-bg); }
+.health.unknown { border-left-color: var(--muted); }
+
+/* 狀態標籤 */
+.badge {
+  display: inline-block; font-size: .78rem; padding: .1rem .45rem;
+  border-radius: 4px; white-space: nowrap; font-weight: 600;
+}
+.badge.ok { color: var(--ok); background: var(--ok-bg); }
+.badge.warn { color: var(--warn); background: var(--warn-bg); }
+.badge.bad { color: var(--bad); background: var(--bad-bg); }
+.badge.plain { color: var(--muted); background: var(--code-bg); font-weight: 400; }
+
+/* 進度條 */
+.bar {
+  height: .45rem; background: var(--code-bg); border-radius: 3px;
+  overflow: hidden; margin: .3rem 0;
+}
+.bar i { display: block; height: 100%; background: var(--accent); }
+
+/* 工具列:重新整理按鈕 + 篩選器 */
+.toolbar {
+  display: flex; flex-wrap: wrap; gap: .5rem .75rem;
+  align-items: center; margin: 1rem 0; font-size: .88rem;
+}
+.toolbar select, .toolbar button {
+  font: inherit; font-size: .88rem; color: var(--fg);
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 6px; padding: .3rem .6rem;
+}
+.toolbar button { cursor: pointer; }
+.toolbar button:hover { border-color: var(--accent); }
+.toolbar .grow { flex: 1; }
+.toolbar .when { color: var(--muted); }
+
+/* 表格內可展開的明細 */
+details.row summary {
+  cursor: pointer; color: var(--accent); font-size: .85rem;
+  list-style: none;
+}
+details.row summary::-webkit-details-marker { display: none; }
+details.row summary::before { content: "▸ "; }
+details.row[open] summary::before { content: "▾ "; }
+details.row .inner {
+  margin-top: .4rem; padding: .5rem .7rem;
+  background: var(--code-bg); border-radius: 6px; font-size: .85rem;
+}
+
+/* 事件流 */
+.events { list-style: none; margin: 0; padding: 0; }
+.events li {
+  border-bottom: 1px solid var(--line); padding: .7rem .1rem;
+}
+.events .meta { color: var(--muted); font-size: .82rem; }
+.events .what { margin-top: .15rem; }
+
+/* 沒東西可顯示時。空表格會讓人分不出「沒有錯誤」和「讀不到資料」。 */
+.empty {
+  color: var(--muted); background: var(--card);
+  border: 1px dashed var(--line); border-radius: 8px;
+  padding: 1.25rem 1rem; text-align: center; font-size: .92rem;
+}
+.failed { border-color: var(--bad); color: var(--bad); }
+
+.num { font-variant-numeric: tabular-nums; }
+.dim { color: var(--muted); }
