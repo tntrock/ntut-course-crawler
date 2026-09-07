@@ -12,9 +12,11 @@ import json
 from crawler.main import (
     DEFAULT_CAPACITY_REFRESH_AFTER,
     classroom_targets,
+    crawl_capacity,
     select_capacity_targets,
 )
 from crawler.output import read_capacity, write_capacity
+from tests.conftest import load_fixture
 
 
 def read(path):
@@ -118,3 +120,67 @@ class TestSelectCapacityTargets:
         """時間讀不懂就當作該重抓 —— 最壞是多抓一次,不會漏抓。"""
         known = {"48": {"capacity": 50, "checked_at": "壞掉"}}
         assert "48" in select_capacity_targets(known, self.targets())
+
+
+class FakeCroomFetcher:
+    """依 code 回傳教室頁。`fail_on` 裡的代碼會拋例外。"""
+
+    def __init__(self, fail_on=None):
+        self.fail_on = fail_on or set()
+        self.urls = []
+        self.delay = 1.0
+
+    def fetch(self, url, *, params=None):
+        self.urls.append(url)
+        for code in self.fail_on:
+            if f"code={code}" in url:
+                raise RuntimeError(f"模擬 {code} 抓取失敗")
+        return load_fixture("croom_page_real.html")
+
+
+class TestCrawlCapacity:
+    def prepare(self, tmp_path):
+        write_semester_classrooms(tmp_path, "115-1", [
+            {"id": "48", "name": "三教307(e)"},
+            {"id": "9", "name": "共同301"},
+        ])
+
+    def test_writes_capacity_for_every_classroom(self, tmp_path):
+        self.prepare(tmp_path)
+        stats = crawl_capacity(FakeCroomFetcher(), tmp_path)
+        assert stats["fetched"] == 2
+        state = read_capacity(tmp_path)
+        assert state["48"]["capacity"] == 50
+        assert state["48"]["checked_at"].endswith("Z")
+
+    def test_second_run_skips_fresh_entries(self, tmp_path):
+        self.prepare(tmp_path)
+        crawl_capacity(FakeCroomFetcher(), tmp_path)
+        fetcher = FakeCroomFetcher()
+        stats = crawl_capacity(fetcher, tmp_path)
+        assert stats["fetched"] == 0
+        assert fetcher.urls == [], "沒有到期就不該再打學校"
+
+    def test_a_failure_does_not_stop_the_batch(self, tmp_path):
+        self.prepare(tmp_path)
+        stats = crawl_capacity(FakeCroomFetcher(fail_on={"48"}), tmp_path)
+        assert stats["failed"] == 1
+        assert stats["fetched"] == 1
+        assert "9" in read_capacity(tmp_path)
+        assert "48" not in read_capacity(tmp_path), "失敗的不進狀態檔,下次會重試"
+
+    def test_failure_is_recorded_in_errors_json(self, tmp_path):
+        self.prepare(tmp_path)
+        crawl_capacity(FakeCroomFetcher(fail_on={"48"}), tmp_path)
+        errors = read(tmp_path / "errors.json")["errors"]
+        matches = [e for e in errors if e["stage"] == "classroom" and e["classroom_id"] == "48"]
+        assert matches
+        # 一定要帶 year/sem,不然 write_errors() 的保留邏輯會把它當成沒有
+        # 標學年期的舊格式殘留,在下一次任何學期的抓取時整筆消失。
+        assert matches[0]["year"] == 115
+        assert matches[0]["sem"] == 1
+
+    def test_limit_splits_the_work(self, tmp_path):
+        self.prepare(tmp_path)
+        stats = crawl_capacity(FakeCroomFetcher(), tmp_path, limit=1)
+        assert stats["fetched"] == 1

@@ -212,7 +212,7 @@ def _teacher_url(code: str, year: int, sem: int) -> str:
     return f"{BASE_URL}Teach.jsp?format=-3&year={year}&sem={sem}&code={code}"
 
 
-def _classroom_url(code: str, year: int, sem: int) -> str:
+def classroom_url(code: str, year: int, sem: int) -> str:
     return f"{BASE_URL}Croom.jsp?format=-3&year={year}&sem={sem}&code={code}"
 
 
@@ -446,7 +446,7 @@ def _write_classrooms(result: "CrawlResult", semester_dir: Path, pretty: bool) -
                 "name": name,
                 "course_count": len(ids),
                 "course_ids": sorted(ids),
-                "url": _classroom_url(safe, result.year, result.sem) if safe else None,
+                "url": classroom_url(safe, result.year, result.sem) if safe else None,
             }
         )
 
@@ -1372,6 +1372,31 @@ def write_errors(result: "CrawlResult", out_dir: Path, pretty: bool = False) -> 
         },
         pretty,
     )
+
+
+def append_errors(
+    out_dir: Path, errors: list[dict[str, Any]], *, pretty: bool = False
+) -> None:
+    """把錯誤追加進 errors.json,保留其他學年期既有的錯誤。
+
+    給教室容量抓取用 —— 那批 targets 橫跨多個學年期,不像 `write_errors()`
+    是「這一個學期的完整結果」,沒有單一 (year, sem) 可以拿來當替換基準,
+    所以只能用追加語義。**呼叫端要保證每筆錯誤都帶 year/sem**,否則
+    `write_errors()` 的保留邏輯會把它們當成舊格式殘留直接丟掉。
+    """
+    path = Path(out_dir) / "errors.json"
+    existing = _read_json(path) or {}
+    kept = list(existing.get("errors", []))
+    payload = dict(existing)
+    payload.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "error_count": len(kept) + len(errors),
+            "errors": kept + errors,
+        }
+    )
+    _write_json(path, payload, pretty)
 
 
 def _unique(values: Iterable[str]) -> list[str]:

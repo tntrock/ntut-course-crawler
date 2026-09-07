@@ -30,11 +30,15 @@ from .config import SCHEMA_VERSION
 from .http import Fetcher, SiteUnavailable
 from .models import ClassGroup, Course, Department, Semester
 from .output import (
+    append_errors,
+    classroom_url,
     is_frozen_semester,
+    read_capacity,
     read_semester_times,
     syllabus_done_semesters,
     read_syllabus_frozen,
     read_syllabus_state,
+    write_capacity,
     write_errors,
     write_outputs,
     write_semester_failure,
@@ -42,6 +46,7 @@ from .output import (
     write_syllabus_index,
 )
 from .parse_course import parse_courses
+from .parse_croom import parse_classroom
 from .parse_dept import parse_class_groups, parse_colleges
 from .parse_semester import parse_semesters
 from .parse_syllabus import parse_syllabus
@@ -443,6 +448,95 @@ def select_capacity_targets(
     return picked
 
 
+def crawl_capacity(
+    fetcher: Fetcher,
+    out_dir: Path,
+    *,
+    limit: int | None = None,
+    refresh_after: float = DEFAULT_CAPACITY_REFRESH_AFTER,
+    pretty: bool = False,
+) -> dict[str, int]:
+    """抓教室容量,更新 `capacity.json`。
+
+    一次失敗只影響一間教室:記進 errors.json、不寫進狀態檔,下次執行會自動
+    重試(因為它仍然「不在狀態檔裡」)。**不要讓一間教室的版面問題中斷整批。**
+    """
+    out_dir = Path(out_dir)
+    known = read_capacity(out_dir)
+    targets = classroom_targets(out_dir)
+    picked = select_capacity_targets(
+        known, targets, limit=limit, refresh_after=refresh_after
+    )
+    if not picked:
+        log.info("教室容量:沒有需要抓的(共 %d 間已在狀態檔)", len(known))
+        return {"fetched": 0, "changed": 0, "failed": 0}
+
+    log.info("教室容量:這次抓 %d / %d 間", len(picked), len(targets))
+    fetched = changed = failed = 0
+    errors: list[dict[str, Any]] = []
+
+    for index, code in enumerate(picked, start=1):
+        name, year, sem = targets[code]
+        url = classroom_url(code, year, sem)
+        if index % 50 == 0:
+            log.info("教室容量:%d / %d", index, len(picked))
+        try:
+            parsed = parse_classroom(fetcher.fetch(url))
+        except Exception as exc:
+            log.error("教室 %s (%s) 抓取失敗:%s", name, code, exc)
+            # year/sem 用的是抓這頁時所在的學期。這筆會在該學期**下次**抓取
+            # 時被 write_errors() 的保留邏輯清掉(見該函式的說明)—— 那沒關係,
+            # 真正的重試機制不是靠這筆錯誤,而是靠「這間教室不在 capacity.json
+            # 裡」,下個月的容量抓取仍然會把它排進 targets 重新嘗試。
+            errors.append(
+                {
+                    "stage": "classroom",
+                    "classroom_id": code,
+                    "classroom_name": name,
+                    "url": url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "year": year,
+                    "sem": sem,
+                }
+            )
+            failed += 1
+            continue
+
+        # known 的形狀沒有逐筆驗證過(read_capacity 只保證最外層是 dict),
+        # 壞掉的舊資料可能讓 known.get(code) 回傳非 dict 的垃圾值 —— 這裡要
+        # 能容忍而不炸掉。
+        before_entry = known.get(code)
+        before = before_entry.get("capacity") if isinstance(before_entry, dict) else None
+        if parsed["capacity"] is None:
+            errors.append(
+                {
+                    "stage": "classroom",
+                    "classroom_id": code,
+                    "classroom_name": name,
+                    "url": url,
+                    "error": "頁面抓得到但讀不出容量",
+                    "year": year,
+                    "sem": sem,
+                }
+            )
+        elif before is not None and before != parsed["capacity"]:
+            log.info("教室 %s 容量從 %s 變成 %s", name, before, parsed["capacity"])
+            changed += 1
+
+        known[code] = {
+            "name": parsed["name"] or name,
+            "full_name": parsed["full_name"],
+            "capacity": parsed["capacity"],
+            "checked_at": _utc_now(),
+        }
+        fetched += 1
+
+    write_capacity(out_dir, known, pretty=pretty)
+    if errors:
+        append_errors(out_dir, errors, pretty=pretty)
+    return {"fetched": fetched, "changed": changed, "failed": failed}
+
+
 # --------------------------------------------------------------------------
 # 教學大綱
 # --------------------------------------------------------------------------
@@ -788,6 +882,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"教學大綱隔多久重抓一次(預設 {DEFAULT_SYLLABUS_REFRESH_AFTER:.0f} 小時)",
     )
     parser.add_argument(
+        "--with-capacity",
+        action="store_true",
+        help="順便抓教室容量(一間教室一頁,全部約 445 間、9 分鐘,預設關閉)",
+    )
+    parser.add_argument(
+        "--max-capacity",
+        type=int,
+        default=DEFAULT_MAX_CAPACITY,
+        metavar="N",
+        help="這次最多抓幾間教室(預設 0 = 不限)",
+    )
+    parser.add_argument(
+        "--capacity-refresh-after",
+        type=float,
+        default=DEFAULT_CAPACITY_REFRESH_AFTER,
+        metavar="HOURS",
+        help=f"教室容量隔多久重抓(預設 {DEFAULT_CAPACITY_REFRESH_AFTER:.0f} 小時)",
+    )
+    parser.add_argument(
         "--run-summary",
         type=Path,
         default=None,
@@ -906,6 +1019,15 @@ def main(argv: list[str] | None = None) -> int:
                 write_errors(result, args.out, pretty=args.pretty)
 
         snapshot()
+
+    if args.with_capacity:
+        crawl_capacity(
+            fetcher,
+            args.out,
+            limit=args.max_capacity or None,
+            refresh_after=args.capacity_refresh_after,
+            pretty=args.pretty,
+        )
 
     _print_summary(results, fetcher, args.out)
 
