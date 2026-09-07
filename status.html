@@ -53,9 +53,6 @@
 <h2>各學期資料</h2>
 <div id="semesters"><p class="empty">讀取中…</p></div>
 
-<h2>教學大綱進度</h2>
-<div id="syllabus"><p class="empty">讀取中…</p></div>
-
 <h2>修課人數快照</h2>
 <div id="enrollment"><p class="empty">讀取中…</p></div>
 
@@ -70,14 +67,6 @@
 
 <script src="app.js"></script>
 <script>
-// 學校保留教學大綱的下限。96-1 起每學期都有兩千多門課掛著大綱連結,
-// 95-2 以前連結率塌到 12% 以下、點進去欄位全空。
-//
-// 這裡刻意放「資料的事實」而不是「我們打算補到哪」—— 目標會隨計畫改變,
-// 寫成目標的話,計畫一改這頁就會開始說假話(它曾經寫死 110-1,於是在
-// 已經補到 106-1 的當下還宣稱「回補已完成到 110-1」)。
-const SYLLABUS_FLOOR = { year: 96, sem: 1 };
-
 /** 當期學期的資料時間。
  *
  * **不要用 meta.generated_at** —— 那是「meta.json 最後被寫的時間」,回補一個
@@ -176,7 +165,8 @@ function render() {
 
   // ---- 執行紀錄 ----
   block("runs", runs, (node, r) => {
-    const list = r.runs || [];
+    // 最多渲染 100 筆(runs.json 本身保留 120),預設只顯示前 20 列。
+    const list = (r.runs || []).slice(0, 100);
     if (!list.length) {
       node.innerHTML = '<p class="empty">還沒有執行紀錄。</p>';
       return;
@@ -218,6 +208,8 @@ function render() {
       "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
       '<p class="dim" style="font-size:.85rem">共 ' + num(r.run_count) +
       " 筆,保留最近 120 次。「重試」是 workflow 內部整批重跑的次數,跟 Actions 上的 re-run 不是同一件事。</p>";
+
+    collapsibleRows(node, 20, n => "顯示其餘 " + n + " 次執行");
   });
 
   // ---- 各學期資料 ----
@@ -287,7 +279,7 @@ function render() {
           "</span>";
       };
 
-      const row = (x, hide) => "<tr" + (hide ? " hidden" : "") + ">" +
+      const row = x => "<tr>" +
         "<td>" + esc(x.path) +
           (x.path === m.latest ? ' <span class="badge ok">當期</span>' : "") + "</td>" +
         '<td class="num">' + num(x.course_count) + "</td>" +
@@ -308,79 +300,9 @@ function render() {
         "<th>學期</th><th>課程</th><th>教學大綱</th><th>人數快照</th>" +
         "<th>課表更新</th><th>大綱更新</th><th>狀態</th>" +
         "</tr></thead><tbody>";
-      // 全部列都放進**同一張**表,超出 VISIBLE 的先 hidden,用按鈕切換。
-      //
-      // **不要改回用 details 包第二張表。** 那是原本的寫法(details 不能合法
-      // 包住 tr,所以只能另開一張表),但兩張表各自計算欄寬,展開後每一欄都
-      // 對不齊,而且第二張沒有表頭。同一張表的欄寬必然一致。
-      const VISIBLE = 6;
-      const hiddenCount = Math.max(0, all.length - VISIBLE);
-      const label = "顯示其餘 " + hiddenCount + " 個歷史學期";
-
-      node.innerHTML = head + all.map((x, i) => row(x, i >= VISIBLE)).join("") +
-        "</tbody></table></div>" +
-        (hiddenCount ? '<button class="more" type="button">' + label + "</button>" : "");
-
-      const button = node.querySelector("button.more");
-      if (button) {
-        let open = false;
-        button.addEventListener("click", () => {
-          open = !open;
-          node.querySelectorAll("tbody tr").forEach((tr, i) => {
-            if (i >= VISIBLE) tr.hidden = !open;
-          });
-          button.textContent = open ? "收合歷史學期" : label;
-        });
-      }
+      node.innerHTML = head + all.map(x => row(x)).join("") + "</tbody></table></div>";
+      collapsibleRows(node, 6, n => "顯示其餘 " + n + " 個歷史學期");
     });
-
-  // ---- 教學大綱進度 ----
-  // 逐學期的份數與時間已經在上面那張表裡,這裡只留「當期抓到哪」和一行總結。
-  block("syllabus", Promise.allSettled([syllabus, meta]), (node, results) => {
-    const [s, m] = results.map(x => (x.status === "fulfilled" ? x.value : null));
-    if (!s) {
-      node.innerHTML = '<p class="empty failed">讀不到 syllabus.json。</p>';
-      return;
-    }
-    const frozen = s.frozen || {};
-    const doneKeys = Object.keys(frozen).sort((a, b) => semesterKey(b) - semesterKey(a));
-
-    const live = (s.semesters || []).filter(x => !x.frozen).map(entry => {
-      const pct = entry.with_url
-        ? Math.round((entry.fetched / entry.with_url) * 100) : 0;
-      return "<p><strong>" + esc(entry.semester) + "</strong> 當期 · " +
-        num(entry.fetched) + " / " + num(entry.with_url) + " 份(" + pct + "%)" +
-        '</p><div class="bar"><i style="width:' + pct + '%"></i></div>' +
-        '<p class="dim" style="font-size:.85rem">最後一次抓取 ' +
-        esc(taipei(entry.newest_fetch)) +
-        "。每天兩班會整批重抓,但內容沒變的不會重寫檔案。</p>";
-    }).join("");
-
-    // 還沒補的 = 課表已經有、大綱還沒抓、而且在學校資料下限之內的學期。
-    // 從 meta 實際存在的學期去算,不用推算的年份範圍 —— 這樣不會因為
-    // 回補計畫改變而失準,也不會宣稱一個不存在的「完成」。
-    const floor = SYLLABUS_FLOOR.year * 10 + SYLLABUS_FLOOR.sem;
-    const pending = m
-      ? (m.semesters || []).map(x => x.path).filter(
-          path => semesterKey(path) >= floor && path !== m.latest && !frozen[path])
-      : [];
-
-    const headline = doneKeys.length
-      ? "已補完並收合 <strong>" + num(doneKeys.length) + "</strong> 個學期(" +
-        esc(doneKeys[0]) + " ~ " + esc(doneKeys[doneKeys.length - 1]) + ")" +
-        (m ? ",還有 <strong>" + num(pending.length) + "</strong> 個學期的大綱未補"
-           : "")
-      : "還沒有任何學期的大綱補完";
-
-    const note = '<p class="dim" style="font-size:.85rem">逐學期的份數與時間見上面' +
-      "的各學期資料表。學校的教學大綱只保留到 " +
-      SYLLABUS_FLOOR.year + "-" + SYLLABUS_FLOOR.sem +
-      ",再往前每學期的連結率低於 12%,點進去欄位也是空的。</p>";
-
-    // 收合起來:平常只要看到那一句結論,細節想看再展開。
-    node.innerHTML = '<details class="section"><summary>' + headline +
-      "</summary>" + (live || "") + note + "</details>";
-  });
 
   // ---- 人數快照 ----
   // **只列當期學期。** 非當期的學期早就不能加退選,那些快照是靜止的歷史值,
@@ -393,23 +315,18 @@ function render() {
       return;
     }
     const latest = m && m.latest;
+    // 最多渲染 50 天,預設只顯示最近 3 天 —— 一個學期上百天的快照全攤開太長。
     const snaps = (e.snapshots || [])
       .filter(x => !latest || x.semester === latest)
       .slice()
-      .sort((a, b) => (a.date < b.date ? 1 : -1));
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(0, 50);
 
     if (!snaps.length) {
       node.innerHTML = '<p class="empty">' +
         (latest ? esc(latest) + " 還沒有人數快照。" : "還沒有人數快照。") + "</p>";
       return;
     }
-
-    const newest = snaps[0];
-    const headline = esc(newest.semester) + " 最新 <strong>" +
-      num(newest.enrolled_total) + "</strong> 人次修課" +
-      (newest.withdrawn_total
-        ? "、" + num(newest.withdrawn_total) + " 人次撤選" : "") +
-      '(' + esc(newest.date) + ",共 " + num(snaps.length) + " 天的快照)";
 
     // 學期欄拿掉了 —— 過濾之後整欄都是同一個值,留著只是佔空間。
     const rows = snaps.map(x => "<tr>" +
@@ -420,12 +337,14 @@ function render() {
       "<td>" + (x.path ? '<a href="' + esc(x.path) + '">逐課</a>' : "") + "</td>" +
       "</tr>").join("");
 
-    node.innerHTML = '<details class="section"><summary>' + headline + "</summary>" +
+    node.innerHTML =
       '<div class="tablewrap"><table><thead><tr>' +
       "<th>日期</th><th>修課人次</th><th>撤選</th><th>課程</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
-      '<p class="dim" style="font-size:.85rem">日期是台北時區,執行時間是 UTC ——' +
-      "跨日的邊界上兩者可能差一天。</p></details>";
+      '<p class="dim" style="font-size:.85rem">只列' + esc(latest || "當期") +
+      ",日期是台北時區、執行時間是 UTC —— 跨日的邊界上兩者可能差一天。</p>";
+
+    collapsibleRows(node, 3, n => "顯示其餘 " + n + " 天");
   });
 }
 

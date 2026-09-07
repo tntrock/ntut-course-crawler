@@ -162,12 +162,3 @@ button.more {
   border-radius: 6px; padding: .35rem .7rem; margin-top: .7rem; cursor: pointer;
 }
 button.more:hover { border-color: var(--accent); }
-
-/* 區塊層級的展開:summary 那一行就是結論,細節收在裡面。 */
-details.section > summary {
-  cursor: pointer; list-style: none; padding: .5rem 0; font-size: .95rem;
-}
-details.section > summary::-webkit-details-marker { display: none; }
-details.section > summary::before { content: "▸ "; color: var(--accent); }
-details.section[open] > summary::before { content: "▾ "; }
-details.section > summary:hover { color: var(--accent); }

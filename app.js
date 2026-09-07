@@ -117,3 +117,37 @@ function boot(render) {
   if (button) button.addEventListener("click", run);
   run();
 }
+
+
+/** 表格「先顯示幾列,其餘用按鈕展開」。
+ *
+ * 三張表共用同一套,而且**一定是同一張表裡的列**,絕不拆成第二張表 ——
+ * 兩張表各自計算欄寬,展開後每一欄都會對不齊,而且第二張沒有表頭。
+ * (`<details>` 不能合法包住 `<tr>`,所以「用 details 收起多餘的列」這條路
+ * 走不通,只能靠 hidden。)
+ *
+ * `label(n)` 收到的是被藏起來的列數,回傳按鈕上的文字。
+ */
+function collapsibleRows(node, visible, label) {
+  const rows = Array.from(node.querySelectorAll("tbody tr"));
+  if (rows.length <= visible) return;
+
+  const hide = shouldHide => {
+    rows.forEach((tr, i) => { if (i >= visible) tr.hidden = shouldHide; });
+  };
+  hide(true);
+
+  const closed = label(rows.length - visible);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "more";
+  button.textContent = closed;
+
+  let open = false;
+  button.addEventListener("click", () => {
+    open = !open;
+    hide(!open);
+    button.textContent = open ? "收合" : closed;
+  });
+  node.appendChild(button);
+}
