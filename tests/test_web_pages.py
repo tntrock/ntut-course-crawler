@@ -228,3 +228,62 @@ class TestSemesterTableIsOneTable:
     def test_semester_data_renders_in_a_single_table(self) -> None:
         count = self.semesters_block().count("<table>")
         assert count == 1, f"各學期資料用了 {count} 張表格,展開後會對不齊"
+
+
+#: 頁面允許讀的、位在「學期目錄底下」的 JSON。跟 PUBLISHED_JSON 一樣是白名單,
+#: 差別在這些檔的網址一定是組出來的 —— 學期是從資料裡讀到的,寫不死。
+#:
+#: 組網址本來正是這個檔要擋的事,但班級名稱沒有別條路:changes.json 只存代號,
+#: 名稱在各學期的 classes.json 裡,而事件可能橫跨多個學期。所以規則放寬成
+#: 「可以組,但檔名必須在白名單裡」—— 檔名打錯的下場是線上 404、頁面不報錯,
+#: 只是所有班級安靜地退回顯示代號,跟這次要修的毛病一模一樣。
+PUBLISHED_SEMESTER_JSON = {"classes.json"}
+
+#: 只認 `loadJSON(學期變數 + "/檔名.json")` 這一種組法。
+SEMESTER_FETCH_TARGET = re.compile(
+    r"""(?:fetch|loadJSON)\(\s*\w+\s*\+\s*["']/([^"']+)["']"""
+)
+
+
+class TestSemesterScopedSources:
+    @pytest.mark.parametrize("page", PAGES)
+    def test_pages_only_fetch_semester_json_that_is_published(self, page: str) -> None:
+        for target in SEMESTER_FETCH_TARGET.findall(javascript(page)):
+            assert target in PUBLISHED_SEMESTER_JSON, f"{page} 讀了沒發布的 {target}"
+
+    def test_changes_page_looks_up_class_names(self) -> None:
+        """異動頁要把班級代號換成名稱,對照表只在各學期的 classes.json 裡。
+
+        少了這個 fetch 不會有任何錯誤 —— 查表查不到就退回代號,整頁看起來
+        「正常」,只是又變回滿版的 3014、2519。
+        """
+        targets = SEMESTER_FETCH_TARGET.findall(javascript("changes.html"))
+        assert "classes.json" in targets, "異動頁沒讀 classes.json,班級會退回代號"
+
+
+class TestClassIdsRenderAsNames:
+    """班級代號出現在異動頁的三個地方,少改一個就是那一處還在顯示數字。"""
+
+    def changes_js(self) -> str:
+        return javascript("changes.html")
+
+    def test_course_events_do_not_join_class_ids_raw(self) -> None:
+        """課程事件那一行的「· 班級 ⋯」。直接 join 陣列就是印代號。"""
+        assert "e.class_ids.join(" not in self.changes_js()
+
+    def test_bulk_change_tally_translates_class_ids(self) -> None:
+        """整批異動的「依班級」統計,key 本身就是代號,要帶 formatter 進去。"""
+        src = self.changes_js()
+        start = src.index("tally(e.by_class")
+        call = src[start : src.index("\n", start)]
+        assert "className" in call, f"依班級統計沒有換成名稱:{call}"
+
+    def test_class_ids_field_change_translates_both_sides(self) -> None:
+        """course_changed 的「修課班級:A → B」,兩邊都是代號陣列。
+
+        這一欄跟其他欄共用同一個 value(),所以一定要看欄位名分流,
+        不能整批套 —— 上課時間、學分那些欄位沒有班級可查。
+        """
+        assert 'f === "class_ids"' in self.changes_js(), (
+            "course_changed 的 class_ids 欄位沒有換成名稱"
+        )
