@@ -35,11 +35,13 @@ from .output import (
     classroom_url,
     is_frozen_semester,
     read_capacity,
+    read_class_groups,
     read_semester_times,
     syllabus_done_semesters,
     read_syllabus_frozen,
     read_syllabus_state,
     write_capacity,
+    write_classrooms,
     write_errors,
     write_outputs,
     write_semester_failure,
@@ -260,10 +262,17 @@ def crawl(
     sem: int,
     *,
     only_departments: list[str] | None = None,
+    known_groups: dict[str, list[ClassGroup]] | None = None,
 ) -> CrawlResult:
     """跑完整條 format=-2 → -3 → -4 的抓取流程。
 
     單一系所失敗只記錄後繼續,不會拖垮整批(plan.md §3 Phase 4)。
+
+    `known_groups` 是上一輪的班級名單(單位代碼 → 班級),由
+    `read_class_groups()` 從 `<學期>/classes.json` 讀來。單位頁偶發會少列
+    幾個班級連結,而「少列」解析得成功、不觸發任何錯誤路徑 —— 那個班級
+    底下只出現在該處的課就會安靜消失,並被異動偵測記成停開。帶著上一輪的
+    名單就能把少列的班級補抓回來。
     """
     started = time.monotonic()
     result = CrawlResult(year=year, sem=sem, partial=bool(only_departments))
@@ -288,7 +297,14 @@ def crawl(
     for index, dept in enumerate(departments, start=1):
         log.info("[%d/%d] %s (%s)", index, len(departments), dept.name, dept.id)
         try:
-            groups = _crawl_department(fetcher, dept, params, merged, result)
+            groups = _crawl_department(
+                fetcher,
+                dept,
+                params,
+                merged,
+                result,
+                known=(known_groups or {}).get(dept.id, []),
+            )
         except Exception as exc:  # 單位層級失敗:記錄後換下一個
             log.error("單位 %s (%s) 抓取失敗:%s", dept.name, dept.id, exc)
             result.errors.append(
@@ -321,15 +337,64 @@ def crawl(
     return result
 
 
+def _restore_missing_groups(
+    dept: Department,
+    groups: list[ClassGroup],
+    known: list[ClassGroup],
+    result: CrawlResult,
+) -> list[ClassGroup]:
+    """把單位頁這次沒列到、但上一輪有的班級補回名單。
+
+    學校的單位頁偶發會少列幾個班級連結。少列**不是失敗** —— 頁面回 200、
+    解析成功,只是內容變少,所以整條錯誤路徑都不會被觸發。結果是那個班級
+    底下只出現在該處的課直接從資料集消失,再被異動偵測記成「停開」。
+
+    線上實測(2026-09-07 09:47):一次冒出 10 筆假停開,全屬班級 2764;
+    同一批的統計是 departments_ok=60、departments_failed=0、errors=0,
+    只有課表請求數從 355 掉到 350 —— 那 5 個就是沒被列出來的班級。
+
+    補抓靠的是「班級代碼本身就足以取得課表」:`format=-4&code=2764` 單獨
+    打得通,不需要單位頁先列出它。真的被學校撤掉的班級,補抓回來的頁面
+    會是 0 門課,課程層級的停開判定照樣正確。
+    """
+    if not known:
+        return groups
+
+    listed = {group.id for group in groups}
+    missing = [group for group in known if group.id not in listed]
+    if not missing:
+        return groups
+
+    for group in missing:
+        log.warning(
+            "單位 %s (%s) 這次沒列出班級 %s (%s),改用上一輪的名單補抓",
+            dept.name, dept.id, group.name, group.id,
+        )
+        result.errors.append(
+            {
+                "stage": "class_group_missing",
+                "department_id": dept.id,
+                "department_name": dept.name,
+                "class_group_id": group.id,
+                "class_group_name": group.name,
+                "url": group.url,
+                "error": "單位頁這次沒列出這個班級,已用上一輪的名單補抓",
+            }
+        )
+    return groups + missing
+
+
 def _crawl_department(
     fetcher: Fetcher,
     dept: Department,
     params: dict[str, Any],
     merged: dict[str, Course],
     result: CrawlResult,
+    known: list[ClassGroup] = (),
 ) -> list[ClassGroup]:
     html = fetcher.fetch("Subj.jsp", params={"format": -3, "code": dept.id, **params})
     groups = parse_class_groups(html, dept.id)
+    groups = _restore_missing_groups(dept, groups, known, result)
 
     for group in groups:
         try:
@@ -459,6 +524,23 @@ def select_capacity_targets(
     return picked
 
 
+#: 「原本有值、這次讀不到」佔比超過這個數,就當成學校改版、整批不發布。
+CAPACITY_VANISH_LIMIT = 0.2
+
+#: 低於這個筆數不看比例 —— 手動小批量觸發(`--max-capacity 5`)時,一兩間
+#: 剛好被學校撤掉登記就會湊出 50%,那不是版面改動。
+CAPACITY_VANISH_FLOOR = 5
+
+
+def _too_many_capacities_vanished(stats: dict[str, int]) -> bool:
+    """整批的容量是不是「原本有、現在讀不到」得太離譜了。"""
+    vanished = stats.get("vanished", 0)
+    had_value = stats.get("had_value", 0)
+    if vanished < CAPACITY_VANISH_FLOOR or had_value <= 0:
+        return False
+    return vanished / had_value > CAPACITY_VANISH_LIMIT
+
+
 def crawl_capacity(
     fetcher: Fetcher,
     out_dir: Path,
@@ -486,10 +568,16 @@ def crawl_capacity(
     )
     if not picked:
         log.info("教室容量:沒有需要抓的(共 %d 間已在狀態檔)", len(known))
-        return {"fetched": 0, "changed": 0, "failed": 0}
+        return {
+            "fetched": 0, "changed": 0, "failed": 0,
+            "vanished": 0, "had_value": 0,
+        }
 
     log.info("教室容量:這次抓 %d / %d 間", len(picked), len(targets))
     fetched = changed = failed = 0
+    # vanished / had_value 是給呼叫端判斷「版面是不是改了」用的,見下面
+    # 寫入那一段的說明。had_value 是分母:這次抓到、而且原本就有值的教室。
+    vanished = had_value = 0
     errors: list[dict[str, Any]] = []
 
     for index, code in enumerate(picked, start=1):
@@ -547,34 +635,64 @@ def crawl_capacity(
         # 能容忍而不炸掉。
         before_entry = known.get(code)
         before = before_entry.get("capacity") if isinstance(before_entry, dict) else None
-        if parsed["capacity"] is None:
+        if before is not None:
+            had_value += 1
+
+        entry = {
+            "name": parsed["name"] or name,
+            "full_name": parsed["full_name"],
+            "capacity": parsed["capacity"],
+            "checked_at": _utc_now(),
+        }
+
+        # 空白的容量有兩種意思,而且後果天差地遠 —— 一定要分開處理。
+        if parsed["capacity"] is None and before is not None:
+            # (b) 原本有值、這次讀不到。座位數不會無聲消失:改建會改變
+            # 數字,不會把數字變成空白。所以這是版面改了的信號,不是資料。
+            # 保留舊值並記一筆 —— 若照著寫 null,學校一次改版就會讓 216 間
+            # 同時歸零,再透過 4 小時一班的 crawl 擴散到每個學期的
+            # classrooms.json,而唯一的證據(errors.json)四小時後就被
+            # write_errors() 依 (year, sem) 清掉。
+            log.warning("教室 %s 原本是 %s,這次讀不到容量,保留舊值", name, before)
+            entry["capacity"] = before
+            entry["full_name"] = before_entry.get("full_name") or parsed["full_name"]
             errors.append(
                 {
                     "stage": "classroom",
                     "classroom_id": code,
                     "classroom_name": name,
                     "url": url,
-                    "error": "頁面抓得到但讀不出容量",
+                    "error": f"容量原本是 {before},這次讀不出來,保留舊值",
                     "year": year,
                     "sem": sem,
                 }
             )
+            vanished += 1
+        elif parsed["capacity"] is None:
+            # (a) 學校根本沒登記這間的座位數。線上 445 間裡有 229 間是這樣
+            # (一教101、綜科319…,連旁邊的使用率欄位也空),實測打 115-1 /
+            # 110-1 / 105-1 / 199-1 四個學年期全都是空的 —— 永久且正確。
+            #
+            # **不記錯誤。** 記了的話 errors.json 會被 229 筆同樣的訊息塞滿,
+            # 把真正的錯誤整個擠掉,(b) 那種該示警的反而淹沒在裡面。
+            pass
         elif before is not None and before != parsed["capacity"]:
             log.info("教室 %s 容量從 %s 變成 %s", name, before, parsed["capacity"])
             changed += 1
 
-        known[code] = {
-            "name": parsed["name"] or name,
-            "full_name": parsed["full_name"],
-            "capacity": parsed["capacity"],
-            "checked_at": _utc_now(),
-        }
+        known[code] = entry
         fetched += 1
 
     write_capacity(out_dir, known, pretty=pretty)
     if errors:
         append_errors(out_dir, errors, pretty=pretty)
-    return {"fetched": fetched, "changed": changed, "failed": failed}
+    return {
+        "fetched": fetched,
+        "changed": changed,
+        "failed": failed,
+        "vanished": vanished,
+        "had_value": had_value,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1002,7 +1120,13 @@ def main(argv: list[str] | None = None) -> int:
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
         try:
             result = crawl(
-                fetcher, semester.year, semester.sem, only_departments=args.dept
+                fetcher,
+                semester.year,
+                semester.sem,
+                only_departments=args.dept,
+                # 上一輪的班級名單。單位頁少列一個班級不會產生任何錯誤,
+                # 底下的課會安靜消失並被記成停開 —— 見 _restore_missing_groups()。
+                known_groups=read_class_groups(args.out, semester.path),
             )
             result.backfill = bool(args.years)
         except Exception as exc:
@@ -1069,6 +1193,14 @@ def main(argv: list[str] | None = None) -> int:
             refresh_after=args.capacity_refresh_after,
             pretty=args.pretty,
         )
+        # 容量是**這一步**才抓到的,但各學期的 classrooms.json 是上面
+        # write_outputs() 寫的,那時讀到的還是上一輪的 capacity.json。
+        # 補寫一次,讓同一次執行產出的資料自洽 —— 不然使用者會看到
+        # capacity.json 有值、學期檔卻整排 null,要等下一班 crawl 才對得起來。
+        #
+        # 只重寫 classrooms.json,理由見 write_classrooms() 的說明。
+        for result in results:
+            write_classrooms(result, args.out, pretty=args.pretty)
 
     _print_summary(results, fetcher, args.out)
 
@@ -1103,6 +1235,24 @@ def main(argv: list[str] | None = None) -> int:
         log.error(
             "教室容量整批抓取失敗(%d 間全部失敗、一間都沒成功)",
             capacity_stats["failed"],
+        )
+        snapshot(1)
+        return 1
+
+    # 「原本有值、這次讀不到」的比例過高 = 學校八成改版了。單間保留舊值就夠
+    # (見 crawl_capacity),但整批都這樣就不該發布 —— 讓 workflow 的重試迴圈
+    # 發動,並且把這一輪的結果擋在 gh-pages 之外。
+    #
+    # 用比例而不是絕對數量:445 間裡本來就有 229 間是空的,「解析失敗率」
+    # 天生就有 51.5%,設不了門檻。分母只算「這次抓到、而且原本有值」的教室,
+    # 那才是真的會消失的那群。
+    if capacity_stats is not None and _too_many_capacities_vanished(capacity_stats):
+        log.error(
+            "教室容量:%d / %d 間原本有值的教室這次讀不出容量(超過 %.0f%%),"
+            "判定為學校版面改動,不發布這一輪",
+            capacity_stats["vanished"],
+            capacity_stats["had_value"],
+            CAPACITY_VANISH_LIMIT * 100,
         )
         snapshot(1)
         return 1

@@ -174,3 +174,24 @@ class TestCapacityRestoredEverywhere:
                 f"{path.name} 的 Restore shared index files 沒有還原 "
                 "capacity.json,下一次發布會用空值覆蓋掉全站的教室容量"
             )
+
+    def test_every_restore_step_also_restores_the_class_lists(self) -> None:
+        """每個學期的 `classes.json` 是「單位頁少列班級」的唯一防線。
+
+        少列不會產生任何錯誤 —— 頁面回 200、解析成功,只是內容變少 ——
+        那個班級底下的課會安靜地從資料集消失,再被異動偵測記成「停開」。
+        2026-09-07 09:47 線上就這樣一次冒出 10 筆假停開。
+
+        `read_class_groups()` 讀不到檔案時回空 dict、一切照舊,所以漏掉
+        這個 pattern **不會有任何測試失敗**,假停開會直接回來。
+        """
+        for path, step in self.restore_steps():
+            run = step.get("run", "")
+            assert "*/classes.json" in run, (
+                f"{path.name} 的 Restore shared index files 沒有撈各學期的 "
+                "classes.json,單位頁少列班級時會產生假停開"
+            )
+            assert "-name classes.json" in run, (
+                f"{path.name} 有 sparse-checkout pattern 卻沒有把檔案複製進 "
+                "data/,等於沒還原"
+            )

@@ -35,7 +35,11 @@ class FakeFetcher:
         fail_on: set[str] | None = None,
         fail_semesters: set[tuple[int, int]] | None = None,
         unavailable_after: int | None = None,
+        drop_class_groups: set[str] | None = None,
     ) -> None:
+        # 單位頁(format=-3)要少列的班級代碼。學校實測會偶發少列幾個
+        # 連結,而少列不會產生任何錯誤 —— 那正是假停開的來源。
+        self.drop_class_groups = drop_class_groups or set()
         self.fail_on = fail_on or set()
         # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
         self.fail_semesters = fail_semesters or set()
@@ -84,10 +88,29 @@ class FakeFetcher:
         if fmt == -2:
             return load_fixture("subj_overview.html")
         if fmt == -3:
-            return load_fixture("dept_page_real.html")
+            return self._dept_page()
         if fmt == -4:
             return load_fixture("course_list_real.html")
         raise AssertionError(f"沒預期到的 format={fmt}")
+
+    def _dept_page(self) -> str:
+        """單位頁,可選擇性地抽掉幾個班級連結。
+
+        用字串取代而不是改 fixture:要模擬的就是「同一頁,這次少了幾個
+        連結」,其餘內容一模一樣。
+        """
+        html = load_fixture("dept_page_real.html")
+        for code in self.drop_class_groups:
+            marker = f"code={code}"
+            start = html.find(marker)
+            while start != -1:
+                open_tag = html.rfind("<a", 0, start)
+                close_tag = html.find("</a>", start)
+                if open_tag == -1 or close_tag == -1:
+                    break
+                html = html[:open_tag] + html[close_tag + len("</a>") :]
+                start = html.find(marker)
+        return html
 
 
 @pytest.fixture
@@ -109,6 +132,7 @@ def fake_fetcher_factory(monkeypatch):
             self.fail_on: set[str] = set()
             self.fail_semesters: set[tuple[int, int]] = set()
             self.unavailable_after: int | None = None
+            self.drop_class_groups: set[str] = set()
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
@@ -116,6 +140,7 @@ def fake_fetcher_factory(monkeypatch):
                 fail_on=self.fail_on,
                 fail_semesters=self.fail_semesters,
                 unavailable_after=self.unavailable_after,
+                drop_class_groups=self.drop_class_groups,
             )
             self.created.append(fetcher)
             return fetcher
@@ -744,4 +769,61 @@ class TestCapacityFailureAffectsExitCode:
             "--year", "115", "--sem", "1", "--out", str(tmp_path),
             "--with-capacity", "--log-level", "CRITICAL",
         ])
+        assert code == 0
+
+
+class TestMassCapacityDisappearanceStopsPublishing:
+    """「原本有值、現在讀不到」的比例過高 = 學校改版,這一輪不該發布。
+
+    單間保留舊值就夠了(見 crawl_capacity),但整批都這樣時,保留舊值只是
+    讓錯誤悄悄過去 —— 要讓 workflow 的 `until` 重試迴圈真的發動,並且把
+    這一輪擋在 gh-pages 之外。
+
+    用比例不用絕對數量:445 間裡本來就有 229 間是空的,「解析失敗率」天生
+    就是 51.5%,設不了門檻。分母只算「這次抓到、而且原本有值」的那群。
+    """
+
+    def run(self, tmp_path, monkeypatch, stats):
+        monkeypatch.setattr("crawler.main.crawl_capacity", lambda *a, **k: stats)
+        return main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--with-capacity", "--log-level", "CRITICAL",
+        ])
+
+    def test_wholesale_disappearance_is_a_non_zero_exit(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        code = self.run(tmp_path, monkeypatch, {
+            "fetched": 445, "changed": 0, "failed": 0,
+            "vanished": 216, "had_value": 216,
+        })
+        assert code == 1
+
+    def test_a_handful_of_disappearances_still_exits_zero(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """學校撤掉幾間教室的登記是會發生的,不該讓整批不發布。"""
+        code = self.run(tmp_path, monkeypatch, {
+            "fetched": 445, "changed": 0, "failed": 0,
+            "vanished": 10, "had_value": 216,
+        })
+        assert code == 0
+
+    def test_small_manual_batches_are_not_judged_by_ratio(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """`--max-capacity 5` 手動跑時,一兩間就湊得出 50% —— 那不是版面改動。"""
+        code = self.run(tmp_path, monkeypatch, {
+            "fetched": 5, "changed": 0, "failed": 0,
+            "vanished": 2, "had_value": 3,
+        })
+        assert code == 0
+
+    def test_old_style_stats_without_the_new_keys_do_not_crash(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """回傳值少了新欄位時要當成「沒有消失」,不能 KeyError 掉整批。"""
+        code = self.run(tmp_path, monkeypatch, {
+            "fetched": 445, "changed": 0, "failed": 0,
+        })
         assert code == 0

@@ -8,18 +8,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 
 from crawler.http import SiteUnavailable
 from crawler.main import (
     DEFAULT_CAPACITY_REFRESH_AFTER,
     classroom_targets,
     crawl_capacity,
+    main,
     select_capacity_targets,
     crawl,
 )
 from crawler.output import read_capacity, write_capacity, write_outputs
 from tests.conftest import load_fixture
-from tests.test_main import FakeFetcher
+from tests.test_main import FakeFetcher, fake_fetcher_factory  # noqa: F401
 
 
 def read(path):
@@ -245,6 +247,107 @@ class FakeCroomFetcherUnavailable:
         return load_fixture("croom_page_real.html")
 
 
+class FakeCroomFetcherNoCapacity:
+    """回傳「學校沒登記座位數」的教室頁:名稱讀得到,容量那格是空的。
+
+    這不是解析失敗 —— 線上 445 間裡有 229 間就長這樣(一教101、綜科319…,
+    連旁邊的使用率欄位也一起空)。實測打 115-1 / 110-1 / 105-1 / 199-1
+    四個學年期都是空的,所以是學校主檔裡就沒這筆。
+    """
+
+    def __init__(self, blank=None):
+        #: None 代表每一間都回空白;給集合則只有那些代碼回空白。
+        self.blank = blank
+        self.urls = []
+        self.delay = 1.0
+
+    def fetch(self, url, *, params=None):
+        self.urls.append(url)
+        if self.blank is None or any(f"code={code}" in url for code in self.blank):
+            return load_fixture("croom_page_no_capacity.html")
+        return load_fixture("croom_page_real.html")
+
+
+class TestBlankCapacityIsNotAlwaysAnError:
+    """`null` 有兩種完全不同的意思,混在一起就兩邊都廢掉。
+
+    (a) 學校沒登記 —— 永久、正確、佔線上 229/445。
+    (b) 原本有值、這次讀不到 —— 版面改了的災難信號。
+
+    修好之前兩者都記一筆「頁面抓得到但讀不出容量」,於是第一次全量跑完
+    errors.json 就變成 229 筆同樣的訊息(error_count 剛好 229),其他錯誤
+    被整個擠掉,而真正該示警的 (b) 反而淹沒在裡面看不見。
+    """
+
+    def prepare(self, tmp_path):
+        write_semester_classrooms(tmp_path, "115-1", [
+            {"id": "48", "name": "三教307(e)"},
+            {"id": "9", "name": "共同301"},
+        ])
+
+    def errors(self, tmp_path):
+        path = tmp_path / "errors.json"
+        return read(path)["errors"] if path.exists() else []
+
+    def test_a_room_that_never_had_a_value_is_not_an_error(self, tmp_path):
+        self.prepare(tmp_path)
+        crawl_capacity(FakeCroomFetcherNoCapacity(), tmp_path)
+        assert self.errors(tmp_path) == [], (
+            "學校沒登記座位數是正常的,不該塞進 errors.json"
+        )
+
+    def test_a_room_that_never_had_a_value_still_records_null(self, tmp_path):
+        """不記錯誤不等於不記資料 —— 使用端要看得出「查過了,學校沒登」。"""
+        self.prepare(tmp_path)
+        crawl_capacity(FakeCroomFetcherNoCapacity(), tmp_path)
+        state = read_capacity(tmp_path)
+        assert state["48"]["capacity"] is None
+        assert state["48"]["checked_at"].endswith("Z")
+
+    def seed(self, tmp_path, capacity=50):
+        write_capacity(tmp_path, {
+            "48": {"name": "三教307(e)", "full_name": "第三教學大樓307室",
+                   "capacity": capacity, "checked_at": "2020-01-01T00:00:00Z"},
+        })
+
+    def test_a_value_that_disappears_keeps_the_old_number(self, tmp_path):
+        """座位數不會無聲消失。改建會改變數字,不會把數字變成空白。"""
+        self.prepare(tmp_path)
+        self.seed(tmp_path)
+        crawl_capacity(FakeCroomFetcherNoCapacity(), tmp_path, refresh_after=0)
+        assert read_capacity(tmp_path)["48"]["capacity"] == 50, (
+            "原本有值卻被 null 蓋掉了 —— 學校改版就會讓 216 間同時歸零"
+        )
+
+    def test_a_value_that_disappears_is_an_error(self, tmp_path):
+        self.prepare(tmp_path)
+        self.seed(tmp_path)
+        crawl_capacity(FakeCroomFetcherNoCapacity(), tmp_path, refresh_after=0)
+        matches = [
+            e for e in self.errors(tmp_path)
+            if e.get("classroom_id") == "48"
+        ]
+        assert matches, "值消失了卻沒有任何紀錄,四小時後就查無對證"
+        assert matches[0]["year"] == 115 and matches[0]["sem"] == 1
+
+    def test_checked_at_still_moves_when_the_value_is_kept(self, tmp_path):
+        """保留舊值,但要留下「這次確實查過」的痕跡,否則下次還會重排。"""
+        self.prepare(tmp_path)
+        self.seed(tmp_path)
+        crawl_capacity(FakeCroomFetcherNoCapacity(), tmp_path, refresh_after=0)
+        assert read_capacity(tmp_path)["48"]["checked_at"] != "2020-01-01T00:00:00Z"
+
+    def test_stats_separate_the_two_kinds_of_blank(self, tmp_path):
+        self.prepare(tmp_path)
+        self.seed(tmp_path)   # 只有 48 原本有值,9 是全新的
+        stats = crawl_capacity(
+            FakeCroomFetcherNoCapacity(), tmp_path, refresh_after=0
+        )
+        assert stats["fetched"] == 2
+        assert stats["vanished"] == 1, "只有 48 是「原本有值、現在沒了」"
+        assert stats["had_value"] == 1, "分母:這次抓到、而且原本有值的教室數"
+
+
 class TestCrawlCapacitySiteUnavailable:
     """`SiteUnavailable` 代表學校端整批不可用,跟單一教室的版面問題不一樣。
 
@@ -337,12 +440,13 @@ class TestCrawlCapacityValueTransitions:
         assert set(entry) == {"name", "full_name", "capacity", "checked_at"}
 
     def test_page_fetched_but_capacity_unparseable(self, tmp_path):
-        """釘住現行 spec'd 行為:解析不出容量時寫 `capacity: None`
-        (覆蓋掉先前已知的好值)、`checked_at` 照樣更新、並記一筆錯誤。
+        """容量那格有東西、但不是數字(`--`)。原本有值就保留舊值 + 記錯誤。
 
-        這是 spec 錯誤處理段明訂的行為,**不是**這次修正的範圍 —— 要不要
-        改成「解析失敗時保留舊值」是使用者的決定(見 ledger Task 4 的
-        deferred minor)。這個測試只是把現況釘住,行為一旦被改掉就會失敗。
+        這條原本釘的是相反的行為(讀不出來就覆蓋成 None),那是 spec 明訂的。
+        線上第一次全量跑之後改掉:445 間裡有 229 間學校根本沒登記座位數,
+        於是 `null` 同時代表「學校沒登」和「解析失敗」,兩者無法區分 ——
+        errors.json 被 229 筆同樣的訊息塞滿,而真正的災難信號反而看不見。
+        分界改成「**原本有沒有值**」,那才是真的能區分兩者的東西。
         """
         self.prepare(tmp_path)
         write_capacity(tmp_path, {
@@ -351,12 +455,20 @@ class TestCrawlCapacityValueTransitions:
         })
         crawl_capacity(FakeUnparsableCroomFetcher(), tmp_path)
         entry = read_capacity(tmp_path)["48"]
-        assert entry["capacity"] is None, "現行行為:讀不出來就覆蓋成 None"
+        assert entry["capacity"] == 50, "原本有值就不該被讀不出來的結果蓋掉"
         assert entry["checked_at"] != "2020-01-01T00:00:00Z"
         errors = read(tmp_path / "errors.json")["errors"]
         assert any(
-            e["classroom_id"] == "48" and "讀不出容量" in e["error"] for e in errors
+            e["classroom_id"] == "48" and "保留舊值" in e["error"] for e in errors
         )
+
+    def test_unparseable_capacity_with_no_previous_value_writes_null(self, tmp_path):
+        """沒有舊值可保留時就照實寫 null —— 「查過了,讀不到」也是資訊。"""
+        self.prepare(tmp_path)
+        crawl_capacity(FakeUnparsableCroomFetcher(), tmp_path)
+        entry = read_capacity(tmp_path)["48"]
+        assert entry["capacity"] is None
+        assert entry["checked_at"].endswith("Z")
 
 
 class TestClassroomsGetCapacity:
@@ -417,3 +529,65 @@ class TestEndpointsListed:
         write_outputs(crawl(FakeFetcher(), 115, 1, only_departments=["59"]), tmp_path)
         paths = [e["path"] for e in read(tmp_path / "meta.json")["endpoints"]]
         assert "capacity.json" in paths
+
+
+class TestClassroomsJsonCarriesThisRunsCapacity:
+    """`--with-capacity` 跑完,各學期的 classrooms.json 要帶**這次**抓到的容量。
+
+    修好之前 main() 的順序是反的:先 `write_outputs()`(裡面的
+    `_write_classrooms()` 去讀 capacity.json)才 `crawl_capacity()`
+    (寫 capacity.json)。於是學期檔永遠帶著上一輪的容量。
+
+    第一次上線就踩到了:capacity.json 有 216 間的實際座位數,
+    `115-1/classrooms.json` 卻只有 1 間有值 —— 因為那一輪讀到的是前一次
+    測試跑的 5 間狀態檔。要等下一班 crawl 才補得回來。
+    """
+
+    def fake_capacity_crawl(self, tmp_path):
+        """假裝容量抓取跑完並寫了狀態檔,回傳可餵給 monkeypatch 的函式。"""
+
+        def run(fetcher, out_dir, **kwargs):
+            write_capacity(Path(out_dir), {
+                "434": {"name": "六教427(e)", "full_name": "第六教學大樓427室",
+                        "capacity": 50, "checked_at": "2026-09-07T02:00:00Z"},
+            })
+            return {"fetched": 1, "changed": 0, "failed": 0}
+
+        return run
+
+    def test_capacity_lands_in_the_same_run(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "crawler.main.crawl_capacity", self.fake_capacity_crawl(tmp_path)
+        )
+        main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--dept", "59", "--with-capacity", "--log-level", "CRITICAL",
+        ])
+        rooms = {
+            r["id"]: r
+            for r in read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
+        }
+        assert "434" in rooms, "測試前提:假課表裡要有教室 434"
+        assert rooms["434"]["capacity"] == 50, (
+            "classrooms.json 沒帶到這次抓到的容量,又落後一輪了"
+        )
+
+    def test_without_the_flag_nothing_extra_is_written(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """沒開 `--with-capacity` 就不該有補寫這一步 —— 那是白做工。"""
+        calls = []
+        real = __import__(
+            "crawler.output", fromlist=["write_classrooms"]
+        ).write_classrooms
+        monkeypatch.setattr(
+            "crawler.main.write_classrooms",
+            lambda *a, **k: (calls.append(a), real(*a, **k))[1],
+        )
+        main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--dept", "59", "--log-level", "CRITICAL",
+        ])
+        assert calls == []

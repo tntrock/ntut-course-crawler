@@ -60,7 +60,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classrooms.json'
+            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classrooms.json' '*/classes.json'
             for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
@@ -79,6 +79,17 @@ jobs:
               found=$((found + 1))
             done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classrooms.json -print0)
             echo "已還原 $found 個學期的 classrooms.json"
+            # classes.json 是另一件事:這支 workflow 也會完整抓一次課表,
+            # 所以同樣需要上一輪的班級名單來補單位頁偶發少列的班級,
+            # 否則它自己就會製造出假停開。
+            found=0
+            while IFS= read -r -d '' path; do
+              rel="${path#.gh-pages/}"
+              mkdir -p "data/$(dirname "$rel")"
+              cp "$path" "data/$rel"
+              found=$((found + 1))
+            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classes.json -print0)
+            echo "已還原 $found 個學期的 classes.json"
           else
             echo "gh-pages 還不存在(第一次跑),從零開始"
           fi

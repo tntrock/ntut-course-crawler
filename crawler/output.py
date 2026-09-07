@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
 from .config import BASE_URL, INDEX_SEMESTERS, SCHEMA_VERSION, TAIPEI
-from .models import Course, requirement_table
+from .models import ClassGroup, Course, requirement_table
 from .periods import period_table
 
 if TYPE_CHECKING:  # 避免與 main.py 互相 import
@@ -130,6 +130,28 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_index(result, out_dir, pretty)
     _write_meta(result, out_dir, pretty)
     write_errors(result, out_dir, pretty)
+
+
+def write_classrooms(
+    result: "CrawlResult", out_dir: Path, *, pretty: bool = False
+) -> None:
+    """只重寫本學期的 `classrooms.json`。
+
+    是公開的,因為抓完教室容量之後要單獨再寫一次。`_write_classrooms()` 的
+    容量是從 `capacity.json` 讀來的,而 `write_outputs()` 執行的當下那個檔
+    還是**上一輪**的內容 —— 容量抓取排在課表之後。不補這一次,每學期的
+    classrooms.json 就永遠落後容量一輪。
+
+    第一次上線就踩到了:capacity.json 寫進 216 間的實際座位數,同一次跑
+    產生的 `115-1/classrooms.json` 卻只有 1 間有值。
+
+    跟 `write_errors()` 一樣,**不要改回呼叫 `write_outputs()`** —— 它會連
+    `changes.json` 一起重跑,而那個檔是追加語義,同一筆 baseline 會記兩遍。
+    """
+    out_dir = Path(out_dir)
+    semester_dir = out_dir / result.semester
+    semester_dir.mkdir(parents=True, exist_ok=True)
+    _write_classrooms(result, semester_dir, out_dir, pretty)
 
 
 def _clean_rebuilt_dirs(semester_dir: Path) -> None:
@@ -567,6 +589,35 @@ def read_capacity(out_dir: Path) -> dict[str, dict[str, Any]]:
     payload = _read_json(Path(out_dir) / "capacity.json") or {}
     classrooms = payload.get("classrooms")
     return classrooms if isinstance(classrooms, dict) else {}
+
+
+def read_class_groups(out_dir: Path, semester: str) -> dict[str, list[ClassGroup]]:
+    """從上一輪的 `<學期>/classes.json` 讀回「這個單位有哪些班級」。
+
+    給 `crawl()` 當底,用來補上單位頁偶發少列的班級 —— 少列不會產生任何
+    錯誤,底下的課會安靜地從資料集消失並被記成停開(見
+    tests/test_missing_class_groups.py 的說明)。
+
+    檔案不存在或壞掉時回空 dict:這是補強,不能讓它擋住抓取。認不出單位的
+    班級(`department_id` 是 null)略過 —— 沒有單位就無從補進任何一個單位。
+    """
+    payload = _read_json(Path(out_dir) / semester / "classes.json") or {}
+    groups: dict[str, list[ClassGroup]] = {}
+    for entry in payload.get("classes") or []:
+        if not isinstance(entry, dict):
+            continue
+        code, dept_id = entry.get("id"), entry.get("department_id")
+        if not isinstance(code, str) or not isinstance(dept_id, str):
+            continue
+        groups.setdefault(dept_id, []).append(
+            ClassGroup(
+                id=code,
+                name=entry.get("name") or code,
+                department_id=dept_id,
+                url=entry.get("url") or "",
+            )
+        )
+    return groups
 
 
 def write_capacity(
