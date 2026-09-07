@@ -96,8 +96,11 @@ function timeSlot(slot) {
   return "週" + day + (periods ? " " + periods + " 節" : "");
 }
 
-/** 欄位值可能是字串、數字、陣列,也可能是 time_slots 那種物件陣列。 */
-function value(v) {
+/** 欄位值可能是字串、數字、陣列,也可能是 time_slots 那種物件陣列。
+ *
+ * `fmt` 給的是「這一欄的純量要怎麼轉成文字」,目前只有 class_ids 用得到
+ * (代號換名稱)。回傳純文字,呼叫端照樣 esc()。 */
+function value(v, fmt) {
   if (v === null || v === undefined || v === "") return "(空)";
   if (Array.isArray(v)) {
     if (!v.length) return "(空)";
@@ -105,23 +108,60 @@ function value(v) {
       if (x && typeof x === "object") {
         return "periods" in x ? timeSlot(x) : JSON.stringify(x);
       }
-      return String(x);
+      return fmt ? fmt(x) : String(x);
     }).join("、");
   }
   if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
+  return fmt ? fmt(v) : String(v);
 }
 
-function tally(obj, limit) {
+/** `fmt` 同樣回傳純文字,esc 留在這裡做。 */
+function tally(obj, limit, fmt) {
   const keys = Object.keys(obj || {});
   if (!keys.length) return "(無)";
   return keys.slice(0, limit)
-    .map(k => esc(k) + " " + num(obj[k]))
+    .map(k => esc(fmt ? fmt(k) : k) + " " + num(obj[k]))
     .join("、") + (keys.length > limit ? " …" : "");
 }
 
-/** 一筆事件渲染成一句人話。 */
-function describe(e) {
+/** 班級代號 → 名稱。查不到就原樣顯示代號。
+ *
+ * 查不到是正常的,不是錯:舊學期的班級可能早就不存在,而那個學期的
+ * classes.json 也可能沒讀到。退回代號至少還能對得上原始資料。 */
+function className(index, semester, id) {
+  const map = index[semester];
+  return (map && map[id]) || id;
+}
+
+/** 建代號→名稱的對照表,一個學期一份。
+ *
+ * changes.json 只存代號(3014),名稱在各學期的 classes.json 裡。**一定要
+ * 分學期**:同一個代號在不同學期是不同的班,共用一份全域對照會張冠李戴。
+ *
+ * 只抓「事件裡真的出現過班級」的學期 —— 平常就是當期那一支。任何一支讀
+ * 不到就讓那個學期沿用代號,絕不讓整頁跟著壞:這份對照表是錦上添花,
+ * 異動內容本身不靠它。 */
+async function classNameIndex(events) {
+  const wanted = events.filter(e =>
+    (e.class_ids && e.class_ids.length) || e.by_class ||
+    (e.changes && e.changes.class_ids));
+  const semesters = [...new Set(wanted.map(e => e.semester))].filter(Boolean);
+  const index = {};
+  const results = await Promise.allSettled(
+    semesters.map(s => loadJSON(s + "/classes.json")));
+  results.forEach((r, i) => {
+    if (r.status !== "fulfilled") return;
+    const map = {};
+    (r.value.classes || []).forEach(c => {
+      if (c && c.id) map[c.id] = c.name;
+    });
+    index[semesters[i]] = map;
+  });
+  return index;
+}
+
+/** 一筆事件渲染成一句人話。`index` 是 classNameIndex() 的班級對照表。 */
+function describe(e, index) {
   if (e.type === "baseline") {
     // 回補歷史學期時沒有可比對的基準。標清楚,免得被當成一次加開三千門課。
     return "<b>" + esc(e.semester) + " 建立比對基準</b>(" + num(e.course_count) +
@@ -136,7 +176,8 @@ function describe(e) {
         esc(s.name || s.id) + "</li>").join("");
     return "<b>整批異動 " + num(e.event_count) + " 筆</b>(" + esc(counts) + ")" +
       '<div class="dim">依單位:' + tally(e.by_department, 10) + "</div>" +
-      '<div class="dim">依班級:' + tally(e.by_class, 8) + "</div>" +
+      '<div class="dim">依班級:' +
+        tally(e.by_class, 8, id => className(index, e.semester, id)) + "</div>" +
       (samples ? "<ul style=\"margin:.4rem 0 0 1.1rem;padding:0\">" + samples + "</ul>" : "") +
       '<div class="dim" style="margin-top:.3rem">集中在少數幾個單位通常是學校開了一批課;' +
       "散落在幾十個單位則多半是版面改了或抓歪了。</div>";
@@ -154,14 +195,21 @@ function describe(e) {
   const who = (e.teachers && e.teachers.length) ? e.teachers.join("、") : "未列教師";
   const head = "<b>" + esc(e.name || e.id) + '</b> <span class="dim">' + esc(e.id) +
     "</span><div class=\"dim\">" + esc(who) +
-    (e.class_ids && e.class_ids.length ? " · 班級 " + esc(e.class_ids.join("、")) : "") +
+    (e.class_ids && e.class_ids.length
+      ? " · 班級 " +
+        esc(e.class_ids.map(id => className(index, e.semester, id)).join("、"))
+      : "") +
     "</div>";
 
   if (e.type === "course_changed" && e.changes) {
-    const rows = Object.keys(e.changes).map(f =>
-      "<li>" + esc(FIELDS[f] || f) + ":" +
-      '<span class="dim">' + esc(value(e.changes[f].from)) + "</span> → " +
-      esc(value(e.changes[f].to)) + "</li>").join("");
+    const rows = Object.keys(e.changes).map(f => {
+      // 只有 class_ids 這一欄的值是代號;上課時間、學分那些照原樣印。
+      const fmt = f === "class_ids"
+        ? (id => className(index, e.semester, id)) : null;
+      return "<li>" + esc(FIELDS[f] || f) + ":" +
+        '<span class="dim">' + esc(value(e.changes[f].from, fmt)) + "</span> → " +
+        esc(value(e.changes[f].to, fmt)) + "</li>";
+    }).join("");
     return head + "<ul style=\"margin:.35rem 0 0 1.1rem;padding:0\">" + rows + "</ul>";
   }
   return head;
@@ -181,7 +229,13 @@ function render() {
       "(" + esc(relative(d.checked_at || d.generated_at)) + ")</span></div>";
   });
 
-  block("events", changes, (node, d) => {
+  // 事件區塊要等班級對照表,摘要區塊不用 —— 摘要先畫,不必陪著等。
+  // classNameIndex() 自己吞掉失敗、永遠 resolve,所以這條鏈不會把
+  // 事件區塊擋掉;最壞的情況就是班級退回顯示代號。
+  const withNames = changes.then(async d =>
+    ({ d, index: await classNameIndex(d.events || []) }));
+
+  block("events", withNames, (node, { d, index }) => {
     const all = d.events || [];
     if (!all.length) {
       node.innerHTML = '<p class="empty">還沒有記錄到任何異動。' +
@@ -219,7 +273,7 @@ function render() {
           '<span class="badge ' + info.cls + '">' + esc(info.label) + "</span> " +
           esc(e.semester) + " · " + esc(relative(e.at)) +
           ' <span class="dim">' + esc(taipei(e.at)) + "</span></div>" +
-          '<div class="what">' + describe(e) + "</div></li>";
+          '<div class="what">' + describe(e, index) + "</div></li>";
       }).join("") + "</ul>" +
         '<p class="dim" style="font-size:.85rem">顯示 ' + rows.length + " / " +
         all.length + " 筆。事件流有上限,太舊的會被擠掉。</p>";
