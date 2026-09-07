@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -81,6 +82,14 @@ DEFAULT_SYLLABUS_REFRESH_AFTER = 6.0
 #: 實測 1.20 秒/頁 → 全抓一輪約 38 分鐘,每天跑得完,所以預設不限。
 #: 想分批(例如冒煙測試)再用 --max-syllabus 壓。
 DEFAULT_MAX_SYLLABUS = 0
+
+#: 教室容量隔多久重抓一次。**刻意小於一個月** —— 排程是每月 1 號,但二月
+#: 只有 28 天,加上 Actions 的 cron 實測常延遲 2~4 小時,門檻若設 30 天,
+#: 二月那輪會因為「還沒過 30 天」而整批跳過。
+DEFAULT_CAPACITY_REFRESH_AFTER = 480.0
+
+#: 一次最多抓幾間教室(0 = 不限,全部 445 間約 9 分鐘)。
+DEFAULT_MAX_CAPACITY = 0
 
 
 # --------------------------------------------------------------------------
@@ -357,6 +366,81 @@ def _crawl_department(
                 result.merged_courses += 1
 
     return groups
+
+
+# --------------------------------------------------------------------------
+# 教室容量
+# --------------------------------------------------------------------------
+def _parse_stamp(raw: Any) -> datetime | None:
+    """把 `2026-09-07T02:00:00Z` 解析成 aware datetime。看不懂就回 None。"""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def classroom_targets(out_dir: Path) -> dict[str, tuple[str, int, int]]:
+    """掃過每個學期的 `classrooms.json`,列出所有教室代碼要用哪個學期去抓。
+
+    用**該教室最新出現過的學期** —— 那個頁面確定存在。由實測可知 year/sem
+    不影響容量值(打不存在的 year=199 仍回傳正確容量),所以選哪個學期只影響
+    「頁面在不在」,不影響資料。
+    """
+    targets: dict[str, tuple[str, int, int]] = {}
+    for path in sorted(Path(out_dir).glob("*/classrooms.json")):
+        match = re.fullmatch(r"(\d+)-([12])", path.parent.name)
+        if not match:
+            continue
+        year, sem = int(match.group(1)), int(match.group(2))
+        payload = _read_json_or_empty(path)
+        for entry in payload.get("classrooms", []):
+            code = entry.get("id")
+            if not code:
+                continue  # 沒有代碼就組不出 URL
+            previous = targets.get(code)
+            if previous is None or (year, sem) > (previous[1], previous[2]):
+                targets[code] = (entry.get("name") or code, year, sem)
+    return targets
+
+
+def _read_json_or_empty(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log.warning("讀不到或解析不了 %s,略過", path)
+        return {}
+
+
+def select_capacity_targets(
+    known: dict[str, dict[str, Any]],
+    targets: dict[str, tuple[str, int, int]],
+    *,
+    limit: int | None = None,
+    refresh_after: float = DEFAULT_CAPACITY_REFRESH_AFTER,
+    now: datetime | None = None,
+) -> list[str]:
+    """挑出這次要抓的教室代碼。
+
+    兩條規則:不在狀態檔的要抓;超過重抓門檻的要重抓。**沒有永久凍結** ——
+    容量會因改建而變,凍結的話新值永遠抓不到。
+    """
+    now = now or datetime.now(timezone.utc)
+    picked: list[str] = []
+    for code in sorted(targets):
+        entry = known.get(code)
+        if entry is not None:
+            stamp = _parse_stamp(entry.get("checked_at"))
+            # 時間讀不懂就當作該重抓 —— 最壞是多抓一次,不會漏抓
+            if stamp is not None:
+                age = (now - stamp).total_seconds() / 3600
+                if age < refresh_after:
+                    continue
+        picked.append(code)
+        if limit and len(picked) >= limit:
+            break
+    return picked
 
 
 # --------------------------------------------------------------------------
