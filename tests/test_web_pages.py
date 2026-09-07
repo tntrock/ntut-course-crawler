@@ -223,7 +223,7 @@ class TestSemesterTableIsOneTable:
     def semesters_block(self) -> str:
         src = (WEB_DIR / "status.html").read_text(encoding="utf-8")
         start = src.index('block("semesters"')
-        return src[start : src.index('block("syllabus"', start)]
+        return src[start : src.index('block("enrollment"', start)]
 
     def test_semester_data_renders_in_a_single_table(self) -> None:
         count = self.semesters_block().count("<table>")
