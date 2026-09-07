@@ -78,13 +78,24 @@ jobs:
         run: pytest -q
 
       # 只撈幾個跨學期的檔案,不是整包 —— 理由見 restore-note.md。
-      # --sparse 只 checkout 根目錄下的檔案,正好就是這幾個;歷史學期的
-      # 幾千個檔連 blob 都不會下載。發布用 keep_files,它們也不必在本機出現。
+      # 歷史學期的幾千個檔連 blob 都不會下載;發布用 keep_files,它們也
+      # 不必在本機出現。
+      #
+      # 除了根目錄的共用索引檔,還要每個學期的 `classes.json`:
+      # `crawler.main.crawl()` 拿它當底,補上單位頁偶發少列的班級。少列
+      # 不會產生任何錯誤(頁面回 200、解析成功,只是內容變少),那個班級
+      # 底下的課會安靜消失並被異動偵測記成「停開」——
+      # 2026-09-07 09:47 線上就這樣冒出 10 筆假停開。
+      #
+      # **拿掉下面的 `*/classes.json` pattern,這個保護就完全失效,而且
+      # 不會有任何測試失敗** —— 讀不到檔案時 read_class_groups() 回空 dict,
+      # 一切照舊,只是假停開會回來。
       - name: Restore shared index files
         if: ${{ env.REBUILD != 'true' }}
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classes.json'
             for f in meta.json index.json errors.json changes.json enrollment.json capacity.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
@@ -93,6 +104,14 @@ jobs:
                 echo "gh-pages 上還沒有 $f"
               fi
             done
+            found=0
+            while IFS= read -r -d '' path; do
+              rel="${path#.gh-pages/}"
+              mkdir -p "data/$(dirname "$rel")"
+              cp "$path" "data/$rel"
+              found=$((found + 1))
+            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classes.json -print0)
+            echo "已還原 $found 個學期的 classes.json(用來補單位頁少列的班級)"
           else
             echo "gh-pages 還不存在(第一次跑),從零開始"
           fi

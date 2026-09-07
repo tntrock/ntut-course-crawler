@@ -35,7 +35,11 @@ class FakeFetcher:
         fail_on: set[str] | None = None,
         fail_semesters: set[tuple[int, int]] | None = None,
         unavailable_after: int | None = None,
+        drop_class_groups: set[str] | None = None,
     ) -> None:
+        # 單位頁(format=-3)要少列的班級代碼。學校實測會偶發少列幾個
+        # 連結,而少列不會產生任何錯誤 —— 那正是假停開的來源。
+        self.drop_class_groups = drop_class_groups or set()
         self.fail_on = fail_on or set()
         # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
         self.fail_semesters = fail_semesters or set()
@@ -84,10 +88,29 @@ class FakeFetcher:
         if fmt == -2:
             return load_fixture("subj_overview.html")
         if fmt == -3:
-            return load_fixture("dept_page_real.html")
+            return self._dept_page()
         if fmt == -4:
             return load_fixture("course_list_real.html")
         raise AssertionError(f"沒預期到的 format={fmt}")
+
+    def _dept_page(self) -> str:
+        """單位頁,可選擇性地抽掉幾個班級連結。
+
+        用字串取代而不是改 fixture:要模擬的就是「同一頁,這次少了幾個
+        連結」,其餘內容一模一樣。
+        """
+        html = load_fixture("dept_page_real.html")
+        for code in self.drop_class_groups:
+            marker = f"code={code}"
+            start = html.find(marker)
+            while start != -1:
+                open_tag = html.rfind("<a", 0, start)
+                close_tag = html.find("</a>", start)
+                if open_tag == -1 or close_tag == -1:
+                    break
+                html = html[:open_tag] + html[close_tag + len("</a>") :]
+                start = html.find(marker)
+        return html
 
 
 @pytest.fixture
@@ -109,6 +132,7 @@ def fake_fetcher_factory(monkeypatch):
             self.fail_on: set[str] = set()
             self.fail_semesters: set[tuple[int, int]] = set()
             self.unavailable_after: int | None = None
+            self.drop_class_groups: set[str] = set()
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
@@ -116,6 +140,7 @@ def fake_fetcher_factory(monkeypatch):
                 fail_on=self.fail_on,
                 fail_semesters=self.fail_semesters,
                 unavailable_after=self.unavailable_after,
+                drop_class_groups=self.drop_class_groups,
             )
             self.created.append(fetcher)
             return fetcher

@@ -35,6 +35,7 @@ from .output import (
     classroom_url,
     is_frozen_semester,
     read_capacity,
+    read_class_groups,
     read_semester_times,
     syllabus_done_semesters,
     read_syllabus_frozen,
@@ -261,10 +262,17 @@ def crawl(
     sem: int,
     *,
     only_departments: list[str] | None = None,
+    known_groups: dict[str, list[ClassGroup]] | None = None,
 ) -> CrawlResult:
     """跑完整條 format=-2 → -3 → -4 的抓取流程。
 
     單一系所失敗只記錄後繼續,不會拖垮整批(plan.md §3 Phase 4)。
+
+    `known_groups` 是上一輪的班級名單(單位代碼 → 班級),由
+    `read_class_groups()` 從 `<學期>/classes.json` 讀來。單位頁偶發會少列
+    幾個班級連結,而「少列」解析得成功、不觸發任何錯誤路徑 —— 那個班級
+    底下只出現在該處的課就會安靜消失,並被異動偵測記成停開。帶著上一輪的
+    名單就能把少列的班級補抓回來。
     """
     started = time.monotonic()
     result = CrawlResult(year=year, sem=sem, partial=bool(only_departments))
@@ -289,7 +297,14 @@ def crawl(
     for index, dept in enumerate(departments, start=1):
         log.info("[%d/%d] %s (%s)", index, len(departments), dept.name, dept.id)
         try:
-            groups = _crawl_department(fetcher, dept, params, merged, result)
+            groups = _crawl_department(
+                fetcher,
+                dept,
+                params,
+                merged,
+                result,
+                known=(known_groups or {}).get(dept.id, []),
+            )
         except Exception as exc:  # 單位層級失敗:記錄後換下一個
             log.error("單位 %s (%s) 抓取失敗:%s", dept.name, dept.id, exc)
             result.errors.append(
@@ -322,15 +337,64 @@ def crawl(
     return result
 
 
+def _restore_missing_groups(
+    dept: Department,
+    groups: list[ClassGroup],
+    known: list[ClassGroup],
+    result: CrawlResult,
+) -> list[ClassGroup]:
+    """把單位頁這次沒列到、但上一輪有的班級補回名單。
+
+    學校的單位頁偶發會少列幾個班級連結。少列**不是失敗** —— 頁面回 200、
+    解析成功,只是內容變少,所以整條錯誤路徑都不會被觸發。結果是那個班級
+    底下只出現在該處的課直接從資料集消失,再被異動偵測記成「停開」。
+
+    線上實測(2026-09-07 09:47):一次冒出 10 筆假停開,全屬班級 2764;
+    同一批的統計是 departments_ok=60、departments_failed=0、errors=0,
+    只有課表請求數從 355 掉到 350 —— 那 5 個就是沒被列出來的班級。
+
+    補抓靠的是「班級代碼本身就足以取得課表」:`format=-4&code=2764` 單獨
+    打得通,不需要單位頁先列出它。真的被學校撤掉的班級,補抓回來的頁面
+    會是 0 門課,課程層級的停開判定照樣正確。
+    """
+    if not known:
+        return groups
+
+    listed = {group.id for group in groups}
+    missing = [group for group in known if group.id not in listed]
+    if not missing:
+        return groups
+
+    for group in missing:
+        log.warning(
+            "單位 %s (%s) 這次沒列出班級 %s (%s),改用上一輪的名單補抓",
+            dept.name, dept.id, group.name, group.id,
+        )
+        result.errors.append(
+            {
+                "stage": "class_group_missing",
+                "department_id": dept.id,
+                "department_name": dept.name,
+                "class_group_id": group.id,
+                "class_group_name": group.name,
+                "url": group.url,
+                "error": "單位頁這次沒列出這個班級,已用上一輪的名單補抓",
+            }
+        )
+    return groups + missing
+
+
 def _crawl_department(
     fetcher: Fetcher,
     dept: Department,
     params: dict[str, Any],
     merged: dict[str, Course],
     result: CrawlResult,
+    known: list[ClassGroup] = (),
 ) -> list[ClassGroup]:
     html = fetcher.fetch("Subj.jsp", params={"format": -3, "code": dept.id, **params})
     groups = parse_class_groups(html, dept.id)
+    groups = _restore_missing_groups(dept, groups, known, result)
 
     for group in groups:
         try:
@@ -1056,7 +1120,13 @@ def main(argv: list[str] | None = None) -> int:
         log.info("=== 開始抓取 %s(%s)===", semester.path, reason)
         try:
             result = crawl(
-                fetcher, semester.year, semester.sem, only_departments=args.dept
+                fetcher,
+                semester.year,
+                semester.sem,
+                only_departments=args.dept,
+                # 上一輪的班級名單。單位頁少列一個班級不會產生任何錯誤,
+                # 底下的課會安靜消失並被記成停開 —— 見 _restore_missing_groups()。
+                known_groups=read_class_groups(args.out, semester.path),
             )
             result.backfill = bool(args.years)
         except Exception as exc:

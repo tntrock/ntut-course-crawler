@@ -89,6 +89,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classes.json'
             for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
@@ -97,6 +98,17 @@ jobs:
                 echo "gh-pages 上還沒有 $f"
               fi
             done
+            # 每個學期的 classes.json:crawl() 拿它補上單位頁偶發少列的班級。
+            # 少列不會產生任何錯誤,那個班級底下的課會安靜消失並被記成「停開」。
+            # 拿掉這一段不會有測試失敗,只是假停開會回來。
+            found=0
+            while IFS= read -r -d '' path; do
+              rel="${path#.gh-pages/}"
+              mkdir -p "data/$(dirname "$rel")"
+              cp "$path" "data/$rel"
+              found=$((found + 1))
+            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classes.json -print0)
+            echo "已還原 $found 個學期的 classes.json"
           else
             echo "gh-pages 還不存在(第一次跑),從零開始"
           fi
