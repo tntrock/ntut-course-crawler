@@ -1,0 +1,173 @@
+name: capacity
+
+# 教室容量。實測容量來自教室主檔、與學期無關(打不存在的 year=199 仍回傳
+# 正確容量),所以不必每學期抓 —— 每月重抓一輪讓現值在改建後保持正確就夠。
+#
+# 排在同一天 06:00 的整包重建**之前**,讓重建帶著最新的容量發布。
+# 那個時段沒有 4 小時排程的班次(00:00 與 04:00 之間),不會自己撞自己。
+on:
+  schedule:
+    - cron: '0 2 1 * *'
+  workflow_dispatch:
+    inputs:
+      max_capacity:
+        description: '這次最多抓幾間教室(留空 = 不限,全部約 445 間、9 分鐘)'
+        default: ''
+      delay:
+        description: '每次請求後的延遲秒數(下限 0.5)'
+        default: '1.0'
+
+permissions:
+  contents: write
+
+# 與 crawl.yml 共用:容量重抓不可以跟日常抓取同時對學校發請求。
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
+jobs:
+  capacity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: pytest -q
+
+      # 這支 workflow 要還原的東西比其他三支多一種:除了根目錄的共用索引檔
+      # (跟 crawl / syllabus / backfill 一樣,capacity.json 本身也在這裡面 ——
+      # 沒有它 crawl_capacity() 會從空狀態重建,見 crawler.main 的說明),
+      # 還要把**每個學期**的 classrooms.json 都撈回來。
+      #
+      # 原因:crawler.main.classroom_targets() 用「該教室最後出現過的學期」
+      # 決定去哪個學期的頁面抓容量,這樣才能吃到全部 445 個教室代碼 ——
+      # 211 個只出現在舊學期(115-1 當期只有 234 個)。根目錄沒有任何檔案
+      # 帶著全部 445 個代碼(index.json 只涵蓋最新兩學期),所以只能靠展開
+      # sparse-checkout 的 pattern 把 51 個學期的 classrooms.json 都拉回來。
+      #
+      # **拿掉下面的 `*/classrooms.json` pattern 會讓涵蓋率悄悄縮回一個
+      # 學期(這次剛好爬到的那個),而且不會有任何測試失敗** —— 211 間
+      # 只在舊學期出現過的教室會永遠停在 capacity.json 裡的 null。
+      - name: Restore shared index files
+        run: |
+          mkdir -p data
+          if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classrooms.json'
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
+              if [ -f ".gh-pages/$f" ]; then
+                cp ".gh-pages/$f" "data/$f"
+                echo "已還原 $f($(stat -c%s "data/$f") bytes)"
+              else
+                echo "gh-pages 上還沒有 $f"
+              fi
+            done
+            # 逐一複製每個學期的 classrooms.json(見上面說明,這是
+            # classroom_targets() 能不能看到全部 445 個代碼的關鍵)。
+            found=0
+            while IFS= read -r -d '' path; do
+              rel="${path#.gh-pages/}"
+              mkdir -p "data/$(dirname "$rel")"
+              cp "$path" "data/$rel"
+              found=$((found + 1))
+            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classrooms.json -print0)
+            echo "已還原 $found 個學期的 classrooms.json"
+          else
+            echo "gh-pages 還不存在(第一次跑),從零開始"
+          fi
+
+      # 下面的指令**沒有帶 `--year`/`--sem`**,所以 main() 會先自動偵測、
+      # 完整抓一次首頁列出的學年期,再接著跑 `--with-capacity`。這是刻意
+      # 而且是必要的(不是順便):
+      #
+      # - 這是這批教室代碼最新的來源。上面 restore 回來的 classrooms.json
+      #   全部是 gh-pages 上**上次發布**的舊內容;當期若有新開的教室、或
+      #   課表本身有變動,只有真的抓一次課表才拿得到最新名單。
+      # - 更根本的是:如果拿掉這段課表抓取、只跑 `--with-capacity`,
+      #   `data/` 就只剩 restore 回來的舊學期,一旦 gh-pages 還沒發布過
+      #   (repo 剛啟用這支 workflow 的第一次執行)`data/` 會完全是空的,
+      #   `classroom_targets()` 找不到任何 `*/classrooms.json`,整個 job
+      #   會安靜地什麼都不做就結束 —— 這段課表抓取因此是 load-bearing 的,
+      #   不是可以省掉的額外開銷。
+      #
+      # 失敗就等 30 分鐘整批重來,最多 3 次 —— 跟 crawl / syllabus 同一套理由:
+      # crawler 內部的重試治得了線路抖動,治不了學校端幾十分鐘的中斷。
+      # 重試很便宜:已經寫進 capacity.json 的教室不會再被選中(挑選規則會
+      # 跳過未到期的),所以重試只補剩下的,不是從頭再跑一遍。
+      - name: Crawl capacity
+        env:
+          MAX_CAPACITY: ${{ inputs.max_capacity }}
+          DELAY: ${{ inputs.delay || '1.0' }}
+          MAX_ATTEMPTS: '3'
+          RETRY_WAIT_SECONDS: '1800'
+        run: |
+          # 這一段的重試迴圈同樣照抄 syllabus.yml 的 Crawl 步驟,
+          # 只把指令換成下面這行:
+          attempt=1
+          until python -m crawler.main --with-capacity --out data \
+            ${MAX_CAPACITY:+--max-capacity "$MAX_CAPACITY"} \
+            --delay "${DELAY:-1.0}" \
+            --run-summary "$RUNNER_TEMP/run-summary.json"; do
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::error::連續 $attempt 次失敗,放棄本次執行(下一班排程會接續)"
+              echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
+              exit 1
+            fi
+            echo "::warning::第 $attempt 次失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
+            sleep "$RETRY_WAIT_SECONDS"
+            attempt=$((attempt + 1))
+          done
+
+          # 給 Record this run 用:「一次就過」和「重試三次才過」對狀態頁
+          # 是兩回事。放棄的那條路徑在上面也寫了一次。
+          echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
+
+      # 不論成功、失敗、還是 job 逾時被砍,都留下一筆執行紀錄。
+      #
+      # Actions 自己的 log 是給人看的:要登入點進去或帶 token 打 API,而且
+      # 只留 90 天。狀態頁需要的是一份跟資料放在一起、直接 fetch 就拿得到的
+      # 紀錄 —— 那就是 runs.json。
+      #
+      # 狀態從 job.status 拿而不是由爬蟲自己寫,因為最需要紀錄的那幾次
+      # (逾時被砍、整批重試用完)爬蟲根本沒機會寫任何東西。
+      - name: Record this run
+        if: always()
+        run: |
+          python -m crawler.runlog --out data/ \
+            --status "${{ job.status }}" \
+            --summary "$RUNNER_TEMP/run-summary.json"
+
+      # 複製整個 web/:首頁之外還有狀態 / 錯誤 / 異動三頁與共用的資產,
+      # 逐檔列名的話下次加頁一定會漏掉某一支。
+      - name: Add landing pages
+        if: always()
+        run: cp -R web/. data/
+
+      - name: Upload data as artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: data-${{ github.run_id }}
+          path: data/
+          retention-days: 7
+
+      # always():抓到一半失敗、或 job 逾時被砍,也要把已經完成的部分推上去。
+      # 這一步是 keep_files,只會補上 data/ 裡有的檔案,沒寫出來的維持遠端原樣,
+      # 所以「半批成果」不會傷到任何東西 —— 而不推的話,跑了幾小時的成果
+      # 就只剩 artifact 裡那一份,要靠人工撈回來。
+      # 寫檔本身是先寫暫存檔再 rename(見 output.py 的 _write_json),
+      # 被砍在寫到一半也不會留下截斷的 JSON。
+      - name: Publish to gh-pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./data
+          keep_files: true

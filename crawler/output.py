@@ -119,7 +119,7 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_teachers(result, semester_dir, pretty)
     _write_classes(result, semester_dir, pretty)
     _write_programs(result, semester_dir, pretty)
-    _write_classrooms(result, semester_dir, pretty)
+    _write_classrooms(result, semester_dir, out_dir, pretty)
     _write_schedule(result, semester_dir, pretty)
     _write_semester_index(result, semester_dir, pretty)
     _write_enrollment_snapshot(result, semester_dir, out_dir, pretty)
@@ -212,7 +212,7 @@ def _teacher_url(code: str, year: int, sem: int) -> str:
     return f"{BASE_URL}Teach.jsp?format=-3&year={year}&sem={sem}&code={code}"
 
 
-def _classroom_url(code: str, year: int, sem: int) -> str:
+def classroom_url(code: str, year: int, sem: int) -> str:
     return f"{BASE_URL}Croom.jsp?format=-3&year={year}&sem={sem}&code={code}"
 
 
@@ -425,8 +425,19 @@ def _write_programs(result: "CrawlResult", semester_dir: Path, pretty: bool) -> 
     _write_json(semester_dir / "programs.json", payload, pretty)
 
 
-def _write_classrooms(result: "CrawlResult", semester_dir: Path, pretty: bool) -> None:
-    """教室 → 課號。可以拿來找空教室,或看某間教室排了什麼課。"""
+def _write_classrooms(
+    result: "CrawlResult", semester_dir: Path, out_dir: Path, pretty: bool
+) -> None:
+    """教室 → 課號。可以拿來找空教室,或看某間教室排了什麼課。
+
+    `capacity` 取自根目錄的 `capacity.json`,**查表而已,不發任何請求**。
+    狀態檔沒有該代碼時是 `None` —— 「還沒抓過」和「零個座位」是兩回事。
+
+    注意:容量與學期無關(實測 year/sem 不影響該欄位),所以歷史學期的
+    `capacity` 反映的是**最近一次觀測值**,不是那個學期當時的容量。
+    學校不保留歷史容量,這點無法補救,README 有寫明。
+    """
+    capacity = read_capacity(out_dir)
     buckets: dict[tuple[str | None, str], list[str]] = {}
     for course in result.courses:
         for index, name in enumerate(course.classrooms):
@@ -440,13 +451,19 @@ def _write_classrooms(result: "CrawlResult", semester_dir: Path, pretty: bool) -
     classrooms = []
     for (code, name), ids in sorted(buckets.items(), key=lambda kv: kv[0][1]):
         safe = _safe_id(code, "教室") if code else None
+        # capacity 的形狀沒有逐筆驗證過(read_capacity 只保證最外層是 dict),
+        # 壞掉的舊資料可能讓 capacity.get(code) 回傳非 dict 的垃圾值 —— 這裡要
+        # 能容忍而不炸掉。
+        entry = capacity.get(code)
+        cap_value = entry.get("capacity") if isinstance(entry, dict) else None
         classrooms.append(
             {
                 "id": code,
                 "name": name,
+                "capacity": cap_value,
                 "course_count": len(ids),
                 "course_ids": sorted(ids),
-                "url": _classroom_url(safe, result.year, result.sem) if safe else None,
+                "url": classroom_url(safe, result.year, result.sem) if safe else None,
             }
         )
 
@@ -536,6 +553,40 @@ def is_frozen_semester(year: int, sem: int, out_dir: Path) -> bool:
     known = set(read_semester_times(out_dir))
     known.add((year, sem))
     return (year, sem) < max(known)
+
+
+# --------------------------------------------------------------------------
+# 教室容量
+# --------------------------------------------------------------------------
+def read_capacity(out_dir: Path) -> dict[str, dict[str, Any]]:
+    """讀 `capacity.json`,回傳 代碼 → {name, full_name, capacity, checked_at}。
+
+    檔案不存在或壞掉時回空 dict —— 最壞的結果只是重抓一輪(445 頁、約 9 分鐘),
+    不該讓整批抓取無法啟動。
+    """
+    payload = _read_json(Path(out_dir) / "capacity.json") or {}
+    classrooms = payload.get("classrooms")
+    return classrooms if isinstance(classrooms, dict) else {}
+
+
+def write_capacity(
+    out_dir: Path, classrooms: dict[str, dict[str, Any]], *, pretty: bool = False
+) -> None:
+    """寫 `capacity.json`。
+
+    **不留改建沿革** —— 值變了就直接覆蓋。使用端要的是「現在幾個座位」,
+    而學校本來就不保留歷史容量(實測改建後所有學期都會顯示新值)。
+    """
+    _write_json(
+        Path(out_dir) / "capacity.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "classroom_count": len(classrooms),
+            "classrooms": classrooms,
+        },
+        pretty,
+    )
 
 
 def read_syllabus_state(out_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
@@ -1289,6 +1340,7 @@ def _endpoint_table() -> list[dict[str, str]]:
         {"path": "runs.json", "description": "最近的抓取執行紀錄(含失敗與逾時)"},
         {"path": "changes.json", "description": "最近的課程與教師異動事件"},
         {"path": "enrollment.json", "description": "修課 / 撤選人數快照的索引"},
+        {"path": "capacity.json", "description": "教室容量(座位數)"},
         {"path": "syllabus.json", "description": "教學大綱的抓取進度"},
         {
             "path": "{semester}/syllabus/{course_id}.json",
@@ -1338,6 +1390,31 @@ def write_errors(result: "CrawlResult", out_dir: Path, pretty: bool = False) -> 
         },
         pretty,
     )
+
+
+def append_errors(
+    out_dir: Path, errors: list[dict[str, Any]], *, pretty: bool = False
+) -> None:
+    """把錯誤追加進 errors.json,保留其他學年期既有的錯誤。
+
+    給教室容量抓取用 —— 那批 targets 橫跨多個學年期,不像 `write_errors()`
+    是「這一個學期的完整結果」,沒有單一 (year, sem) 可以拿來當替換基準,
+    所以只能用追加語義。**呼叫端要保證每筆錯誤都帶 year/sem**,否則
+    `write_errors()` 的保留邏輯會把它們當成舊格式殘留直接丟掉。
+    """
+    path = Path(out_dir) / "errors.json"
+    existing = _read_json(path) or {}
+    kept = list(existing.get("errors", []))
+    payload = dict(existing)
+    payload.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "error_count": len(kept) + len(errors),
+            "errors": kept + errors,
+        }
+    )
+    _write_json(path, payload, pretty)
 
 
 def _unique(values: Iterable[str]) -> list[str]:

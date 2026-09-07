@@ -694,3 +694,54 @@ class TestBackfillDoesNotDuplicateChangeEvents:
             if e["type"] == "baseline" and e["semester"] == "112-2"
         ]
         assert len(baselines) == 1, f"記了 {len(baselines)} 筆 baseline,應該只有 1 筆"
+
+
+class TestCapacityFailureAffectsExitCode:
+    """`crawl_capacity()` 的回傳值原本被 main() 整個丟掉 —— 斷路器跳開、
+    445 間教室全部失敗時,main() 還是回 0,workflow 的 `until` 重試迴圈
+    永遠不會發動,一次網路中斷就被誤判成成功發布。
+
+    這裡直接 monkeypatch `crawler.main.crawl_capacity`,只驗 main() 有沒有
+    正確讀它的回傳值 —— 斷路器本身在 crawl_capacity 一路要不要停止抓取,
+    由 tests/test_capacity.py 的 TestCrawlCapacitySiteUnavailable 驗。
+    """
+
+    def test_a_wholesale_capacity_failure_is_a_non_zero_exit(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "crawler.main.crawl_capacity",
+            lambda *a, **k: {"fetched": 0, "changed": 0, "failed": 445},
+        )
+        code = main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--with-capacity", "--log-level", "CRITICAL",
+        ])
+        assert code == 1
+
+    def test_a_partial_capacity_failure_still_exits_zero(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """有抓到一些就不算整批失敗 —— 部分成果照樣要發布出去。"""
+        monkeypatch.setattr(
+            "crawler.main.crawl_capacity",
+            lambda *a, **k: {"fetched": 10, "changed": 1, "failed": 2},
+        )
+        code = main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--with-capacity", "--log-level", "CRITICAL",
+        ])
+        assert code == 0
+
+    def test_no_failures_still_exits_zero(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "crawler.main.crawl_capacity",
+            lambda *a, **k: {"fetched": 445, "changed": 3, "failed": 0},
+        )
+        code = main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--with-capacity", "--log-level", "CRITICAL",
+        ])
+        assert code == 0

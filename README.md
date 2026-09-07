@@ -60,6 +60,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
 | `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 120 KB / 天 |
+| `capacity.json` | 教室容量（座位數） | 約 52 KB |
 | `syllabus.json` | 教學大綱的抓取進度與逐課狀態（見下） | 隨課數變動 |
 | `{semester}/syllabus/{course_id}.json` | 單一課程的教學大綱與進度 | 約 3–8 KB / 門 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
@@ -770,6 +771,7 @@ v3 改成比對**內容雜湊**：
     {
       "id": "452",
       "name": "六教727(e)",
+      "capacity": 50,
       "course_count": 12,
       "course_ids": ["364893"],
       "url": "https://aps.ntut.edu.tw/course/tw/Croom.jsp?format=-3&year=115&sem=1&code=452"
@@ -779,6 +781,20 @@ v3 改成比對**內容雜湊**：
 ```
 
 學程只有中文名稱、沒有代碼，所以不另外開明細檔。
+
+#### 教室容量
+
+`capacity.json` 是教室代碼 → 容量的對照表，各學期的 `classrooms.json` 每筆也
+直接帶 `capacity` 欄位，不必再查一次。
+
+> **容量與學期無關。** 實測 `Croom.jsp` 的 `year` / `sem` 參數只影響使用率與
+> 週課表，容量欄位不受影響 —— 打一個不存在的學年度（`year=199`）仍然回傳
+> 正確容量。所以學校**不保留歷史容量**：教室改建後，所有學期都會顯示新值。
+>
+> 因此各學期 `classrooms.json` 的 `capacity` 反映的是**最近一次觀測值**，
+> 不是那個學期當時的容量。抓不到時是 `null`，不是 `0`。
+>
+> 每月重抓一輪，`capacity.json` 的 `checked_at` 是該筆最後一次確認的時間。
 
 ### `115-1/schedule.json`
 
@@ -887,6 +903,7 @@ git 也會收下 1,909 個新 blob。改成比對內容雜湊之後，沒變就�
 |---|---|---|
 | `crawl` | 每 4 小時 | 00、04、08、12、16、20 時 |
 | `syllabus` | 一天兩次 | 09、21 時 |
+| `capacity` | 每月一次 | 1 號 10 時(排在同一天的整包重建之前) |
 | `crawl`（整包重建） | 每月一次 | 1 號 14 時 |
 | `backfill` | 只手動 | 補歷史學期的課表與大綱 |
 
@@ -1054,6 +1071,9 @@ python -m crawler.main --out data/ --years 90-114 --max-semesters 12
 | `--with-syllabus` | 順便抓教學大綱（一門課一頁，很慢，預設關閉） |
 | `--max-syllabus N` | 這次最多抓幾頁大綱，預設 `0` = 不限（全校一輪約 38 分鐘） |
 | `--syllabus-refresh-after H` | 同一門課的大綱隔多久重抓，預設 `6` 小時（配合一天兩班各全跑一輪）。**只對最新學期有效**，歷史學期一律只補沒抓過的 |
+| `--with-capacity` | 順便抓教室容量（座位數），每月重抓一輪，預設關閉 |
+| `--max-capacity N` | 這次最多抓幾間教室，預設 `0` = 不限（全部約 445 間、9 分鐘） |
+| `--capacity-refresh-after H` | 同一間教室的容量隔多久重抓，預設 `480` 小時（20 天） |
 | `--run-summary PATH` | 把這次跑了什麼寫成側寫檔，給 `crawler.runlog` 記進 `runs.json` |
 | `--log-level` | 記錄層級，預設 `INFO`。抓不到東西時開 `DEBUG` 看實際打了哪些 URL |
 
@@ -1190,7 +1210,8 @@ tests/              # 全離線,對 tests/fixtures/ 的真實 HTML 樣本斷言
 scripts/            # 一次性的偵察腳本(recon*.py),不參與正式流程,
                     # 留著是為了保存「當初怎麼確認的」這件事
 .github/workflows/  # crawl(每 4 小時)、syllabus(一天兩班)、
-                    # backfill(手動回補)、test(每次 push)
+                    # capacity(每月一次,教室容量)、backfill(手動回補)、
+                    # test(每次 push)
 web/                # 發布到 gh-pages 根目錄的頁面,整個目錄由 workflow 複製過去
                     # index.html(說明)、status.html(爬蟲狀態)、
                     # errors.html(抓取失敗)、changes.html(課程異動)、
