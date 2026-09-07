@@ -18,6 +18,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKFILL = ROOT / ".github" / "workflows" / "backfill.yml"
+CAPACITY = ROOT / ".github" / "workflows" / "capacity.yml"
 
 #: 守門步驟的 id。後面每一個步驟都必須引用它的輸出。
 GUARD_ID = "remaining"
@@ -94,3 +95,20 @@ class TestGuard:
                 f"步驟 {step.get('name')!r} 沒有掛守門條件,"
                 "沒事做的排程也會執行它"
             )
+
+
+class TestCapacityWorkflow:
+    def workflow(self) -> dict:
+        return yaml.safe_load(CAPACITY.read_text(encoding="utf-8"))
+
+    def test_runs_monthly_and_on_demand(self) -> None:
+        triggers = self.workflow()[True]     # yaml 把 `on:` 解析成布林 True
+        assert triggers["schedule"][0]["cron"] == "0 2 1 * *"
+        assert "workflow_dispatch" in triggers
+
+    def test_shares_the_crawl_concurrency_group(self) -> None:
+        """不可以跟其他抓取同時對學校發請求。"""
+        assert self.workflow()["concurrency"]["group"] == "crawl"
+
+    def test_actually_asks_for_capacity(self) -> None:
+        assert "--with-capacity" in CAPACITY.read_text(encoding="utf-8")
