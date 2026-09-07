@@ -451,11 +451,16 @@ def _write_classrooms(
     classrooms = []
     for (code, name), ids in sorted(buckets.items(), key=lambda kv: kv[0][1]):
         safe = _safe_id(code, "教室") if code else None
+        # capacity 的形狀沒有逐筆驗證過(read_capacity 只保證最外層是 dict),
+        # 壞掉的舊資料可能讓 capacity.get(code) 回傳非 dict 的垃圾值 —— 這裡要
+        # 能容忍而不炸掉。
+        entry = capacity.get(code)
+        cap_value = entry.get("capacity") if isinstance(entry, dict) else None
         classrooms.append(
             {
                 "id": code,
                 "name": name,
-                "capacity": (capacity.get(code) or {}).get("capacity"),
+                "capacity": cap_value,
                 "course_count": len(ids),
                 "course_ids": sorted(ids),
                 "url": classroom_url(safe, result.year, result.sem) if safe else None,

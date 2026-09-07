@@ -212,3 +212,21 @@ class TestClassroomsGetCapacity:
                                          "capacity": 50,
                                          "checked_at": "2026-09-07T02:00:00Z"}})
         write_outputs(self.result(), tmp_path)   # 不拋例外就算過
+
+    def test_corrupt_capacity_entry_does_not_crash(self, tmp_path):
+        """壞掉的狀態檔(非 dict 的垃圾值)不該讓整批寫檔無法啟動 —— 最壞就填 null。"""
+        # 直接寫 capacity.json 並存入非 dict 的值(字串)。
+        # "434" 是測試資料中實際出現的教室代碼。
+        (tmp_path / "capacity.json").write_text(
+            json.dumps({
+                "schema_version": 3,
+                "classroom_count": 2,
+                "classrooms": {"434": "garbage_string", "37": ["garbage_list"]}  # 非 dict 的值
+            }),
+            encoding="utf-8"
+        )
+        # 不拋例外就算過 —— old code with `or {}` would crash with AttributeError
+        write_outputs(self.result(), tmp_path)
+        entries = read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
+        # 壞掉的項目應該填 None,不是拋例外
+        assert all(e["capacity"] is None for e in entries)
