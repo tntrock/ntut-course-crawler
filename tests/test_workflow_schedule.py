@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 BACKFILL = WORKFLOWS_DIR / "backfill.yml"
 CAPACITY = WORKFLOWS_DIR / "capacity.yml"
+
+#: 學校課程查詢系統最舊的學年度。meta.json 實際涵蓋 90-1 ~ 115-1 共 51 個學期,
+#: 再往前首頁就沒有列了。排程的回補範圍必須低到這裡,否則補不完。
+OLDEST_YEAR = 90
 
 #: 守門步驟的 id。後面每一個步驟都必須引用它的輸出。
 GUARD_ID = "remaining"
@@ -59,6 +64,22 @@ class TestSchedule:
             assert "github.event_name" in str(env[key]), (
                 f"{key} 直接讀 inputs,排程觸發時會拿到空值"
             )
+
+    def test_the_scheduled_range_reaches_the_oldest_semester(self) -> None:
+        """排程的範圍要一路涵蓋到學校最舊的那個學年度。
+
+        排程的 YEARS 是寫死的,跟手動 dispatch 的預設(90-114)各走各的。
+        兩邊不一致時,「照排程慢慢補齊」會變成一個永遠不會兌現的承諾 ——
+        而且**完全沒有徵兆**:序列會在範圍的下界停住,`syllabus.json` 看起來
+        每個學期都收合了,狀態頁也不會少一列,就只是那幾個學期從來沒出現過。
+        """
+        env = workflow()["jobs"]["backfill"]["env"]
+        scheduled = re.search(r"'(\d+)-(\d+)'", str(env["YEARS"]))
+        assert scheduled, "找不到排程用的學年度範圍"
+        assert int(scheduled.group(1)) <= OLDEST_YEAR, (
+            f"排程只從 {scheduled.group(1)} 開始補,"
+            f"{OLDEST_YEAR}-{int(scheduled.group(1)) - 1} 學年度永遠輪不到"
+        )
 
 
 class TestGuard:
