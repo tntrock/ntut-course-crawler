@@ -3,7 +3,3 @@ __pycache__/
 .cache/
 data/
 .venv/
-
-# 交接文件是寫給接手的人 / agent 看的工作文件,不是這個專案的對外說明,
-# 不進版本庫。專案怎麼運作看 README.md,抓取禮儀的硬性規定看 plan.md。
-HANDOVER.md

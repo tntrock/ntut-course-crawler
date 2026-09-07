@@ -1,7 +1,7 @@
 """Phase 3 驗收:總覽頁與單位頁解析。
 
 全部對 Phase 0 存下的真實 fixture 斷言。學校改版時這些測試會先失敗,
-這是刻意的預警機制(plan.md §3 Phase 3)。
+這是刻意的預警機制(reference.md「站台結構」)。
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class TestParseColleges:
         assert len(ids) == len(set(ids))
 
     def test_computer_science_department(self, by_name):
-        """plan.md 指定的驗收條件:資工系 → 電資學院。"""
+        """reference.md 記錄的實測結果:資工系 → 電資學院。"""
         dept = by_name["資工系"]
         assert dept.id == "59"
         assert dept.college == "電資學院"
@@ -77,7 +77,7 @@ class TestParseColleges:
 
 class TestParseClassGroups:
     def test_real_department(self, fixture):
-        """plan.md 指定的驗收條件:資工系 5 個班級,含資工四 / 2915。"""
+        """reference.md 記錄的實測結果:資工系 5 個班級,含資工四 / 2915。"""
         groups = parse_class_groups(fixture("dept_page_real.html"), "59")
         assert len(groups) == 5
         assert [g.name for g in groups] == ["資工四", "資工三", "資工二", "資工一", "資工所"]

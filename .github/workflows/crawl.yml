@@ -43,7 +43,7 @@ permissions:
   contents: write
 
 # 同時只跑一個 crawl。兩個 job 一起抓等於對學校併發請求,
-# 那正是 plan.md §1.4 要避免的事。回補共用同一個群組(見 backfill.yml)。
+# 那正是 reference.md「抓取禮儀」要避免的事。回補共用同一個群組(見 backfill.yml)。
 concurrency:
   group: crawl
   cancel-in-progress: false

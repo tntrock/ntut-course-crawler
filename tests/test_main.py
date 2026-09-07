@@ -201,7 +201,7 @@ class TestDeduplication:
 
 class TestErrorHandling:
     def test_failed_department_is_recorded_and_crawl_continues(self):
-        """單一系所失敗不能拖垮整批(plan.md §3 Phase 4)。"""
+        """單一系所失敗不能拖垮整批(reference.md「不要猜 HTML」)。"""
         r = crawl(
             FakeFetcher(fail_on={"59"}), 115, 1, only_departments=["59", "31"]
         )

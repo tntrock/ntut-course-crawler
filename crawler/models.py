@@ -14,7 +14,7 @@ from .periods import DAY_NAMES
 # --------------------------------------------------------------------------
 # 必選修符號對照
 #
-# 來源:Cprog.jsp?format=-5 課程標準頁(plan.md §3 Phase 3)。
+# 來源:Cprog.jsp?format=-5 課程標準頁(reference.md「站台結構」)。
 # 注意 ★ 與 ☆ **都是選修** —— 兩者差別在「共同 / 專業」,不是「必 / 選」。
 # --------------------------------------------------------------------------
 REQUIREMENT_SYMBOLS: dict[str, tuple[bool, str]] = {
@@ -169,7 +169,7 @@ class ClassGroup:
     """班級。對應單位頁(format=-3)的一個連結。
 
     注意 id 與 Department.id 是**兩組不同的 ID**,無法互推,
-    一定要從 format=-3 頁面解析出來(plan.md §1.3 陷阱 2)。
+    一定要從 format=-3 頁面解析出來(reference.md「站台結構」的陷阱 2)。
     """
 
     id: str  # 例 "2915"

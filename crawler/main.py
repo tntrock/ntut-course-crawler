@@ -266,7 +266,7 @@ def crawl(
 ) -> CrawlResult:
     """跑完整條 format=-2 → -3 → -4 的抓取流程。
 
-    單一系所失敗只記錄後繼續,不會拖垮整批(plan.md §3 Phase 4)。
+    單一系所失敗只記錄後繼續,不會拖垮整批(reference.md「不要猜 HTML」)。
 
     `known_groups` 是上一輪的班級名單(單位代碼 → 班級),由
     `read_class_groups()` 從 `<學期>/classes.json` 讀來。單位頁偶發會少列

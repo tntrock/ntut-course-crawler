@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 def parse_colleges(html: str) -> list[Department]:
     """解析總覽頁,回傳所有系所 / 行政單位。
 
-    版面特性(plan.md §3 實測結果):
+    版面特性(reference.md「站台結構」的實測結果):
     - 學院名稱只出現一次,靠 `rowspan` 涵蓋後面幾列,所以要自己追 rowspan
       才能把系所對回學院。
     - 第一列是行政單位(教務處、體育室…),學院欄是全形空白 → college=None。
@@ -73,7 +73,7 @@ def parse_class_groups(html: str, department_id: str) -> list[ClassGroup]:
 
     `department_id` 必須由呼叫端傳入 —— 頁面上只有班級代碼(例 2915),
     沒有系所代碼(例 59),兩者是伺服器分別配發的 ID,無法互推
-    (plan.md §1.3 陷阱 2)。
+    (reference.md「站台結構」的陷阱 2)。
     """
     soup = soup_of(html)
 
