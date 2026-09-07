@@ -207,3 +207,24 @@ class TestStatusPageSources:
         targets = set(FETCH_TARGET.findall(javascript("status.html")))
         missing = STATUS_SOURCES - targets
         assert not missing, f"狀態頁少讀了 {sorted(missing)},對應的欄位會整排變空"
+
+
+class TestSemesterTableIsOneTable:
+    """展開的歷史學期必須跟上面同一張表。
+
+    原本把多出來的列放進 `<details>` 裡的**第二張** `<table>`(因為 details
+    不能合法包住 tr),兩張表各自計算欄寬,展開後每一欄都對不齊,而且第二張
+    沒有表頭,更難讀。
+
+    修法是全部放同一張表、超出的列先 hidden、用按鈕切換 —— 同一張表的欄寬
+    必然一致。這條測試就是釘住「不准再拆成兩張」。
+    """
+
+    def semesters_block(self) -> str:
+        src = (WEB_DIR / "status.html").read_text(encoding="utf-8")
+        start = src.index('block("semesters"')
+        return src[start : src.index('block("syllabus"', start)]
+
+    def test_semester_data_renders_in_a_single_table(self) -> None:
+        count = self.semesters_block().count("<table>")
+        assert count == 1, f"各學期資料用了 {count} 張表格,展開後會對不齊"

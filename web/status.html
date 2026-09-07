@@ -287,7 +287,7 @@ function render() {
           "</span>";
       };
 
-      const row = x => "<tr>" +
+      const row = (x, hide) => "<tr" + (hide ? " hidden" : "") + ">" +
         "<td>" + esc(x.path) +
           (x.path === m.latest ? ' <span class="badge ok">當期</span>' : "") + "</td>" +
         '<td class="num">' + num(x.course_count) + "</td>" +
@@ -308,15 +308,30 @@ function render() {
         "<th>學期</th><th>課程</th><th>教學大綱</th><th>人數快照</th>" +
         "<th>課表更新</th><th>大綱更新</th><th>狀態</th>" +
         "</tr></thead><tbody>";
-      const rest = all.slice(6);
+      // 全部列都放進**同一張**表,超出 VISIBLE 的先 hidden,用按鈕切換。
+      //
+      // **不要改回用 details 包第二張表。** 那是原本的寫法(details 不能合法
+      // 包住 tr,所以只能另開一張表),但兩張表各自計算欄寬,展開後每一欄都
+      // 對不齊,而且第二張沒有表頭。同一張表的欄寬必然一致。
+      const VISIBLE = 6;
+      const hiddenCount = Math.max(0, all.length - VISIBLE);
+      const label = "顯示其餘 " + hiddenCount + " 個歷史學期";
 
-      node.innerHTML = head + all.slice(0, 6).map(row).join("") +
+      node.innerHTML = head + all.map((x, i) => row(x, i >= VISIBLE)).join("") +
         "</tbody></table></div>" +
-        (rest.length
-          ? '<details class="row"><summary>其餘 ' + rest.length +
-            ' 個歷史學期</summary><div class="tablewrap"><table><tbody>' +
-            rest.map(row).join("") + "</tbody></table></div></details>"
-          : "");
+        (hiddenCount ? '<button class="more" type="button">' + label + "</button>" : "");
+
+      const button = node.querySelector("button.more");
+      if (button) {
+        let open = false;
+        button.addEventListener("click", () => {
+          open = !open;
+          node.querySelectorAll("tbody tr").forEach((tr, i) => {
+            if (i >= VISIBLE) tr.hidden = !open;
+          });
+          button.textContent = open ? "收合歷史學期" : label;
+        });
+      }
     });
 
   // ---- 教學大綱進度 ----
@@ -350,42 +365,67 @@ function render() {
           path => semesterKey(path) >= floor && path !== m.latest && !frozen[path])
       : [];
 
-    const summary = doneKeys.length
-      ? "<p>已補完並收合 <strong>" + num(doneKeys.length) + "</strong> 個學期(" +
+    const headline = doneKeys.length
+      ? "已補完並收合 <strong>" + num(doneKeys.length) + "</strong> 個學期(" +
         esc(doneKeys[0]) + " ~ " + esc(doneKeys[doneKeys.length - 1]) + ")" +
         (m ? ",還有 <strong>" + num(pending.length) + "</strong> 個學期的大綱未補"
-           : "") +
-        "。逐學期的份數與時間見上面的各學期資料表。</p>" +
-        '<p class="dim" style="font-size:.85rem">學校的教學大綱只保留到 ' +
-        SYLLABUS_FLOOR.year + "-" + SYLLABUS_FLOOR.sem +
-        ",再往前每學期的連結率低於 12%,點進去欄位也是空的。</p>"
-      : "<p>還沒有任何學期的大綱補完。</p>";
+           : "")
+      : "還沒有任何學期的大綱補完";
 
-    node.innerHTML = (live || "") + summary;
+    const note = '<p class="dim" style="font-size:.85rem">逐學期的份數與時間見上面' +
+      "的各學期資料表。學校的教學大綱只保留到 " +
+      SYLLABUS_FLOOR.year + "-" + SYLLABUS_FLOOR.sem +
+      ",再往前每學期的連結率低於 12%,點進去欄位也是空的。</p>";
+
+    // 收合起來:平常只要看到那一句結論,細節想看再展開。
+    node.innerHTML = '<details class="section"><summary>' + headline +
+      "</summary>" + (live || "") + note + "</details>";
   });
 
   // ---- 人數快照 ----
-  block("enrollment", enrollment, (node, e) => {
-    const snaps = e.snapshots || [];
-    if (!snaps.length) {
-      node.innerHTML = '<p class="empty">還沒有人數快照。</p>';
+  // **只列當期學期。** 非當期的學期早就不能加退選,那些快照是靜止的歷史值,
+  // 放在「人數變化」這個區塊裡只會干擾。哪個學期存有幾筆快照是另一回事,
+  // 上面的各學期資料表仍然照實列出 —— 那張表回答的是「有什麼資料」。
+  block("enrollment", Promise.allSettled([enrollment, meta]), (node, results) => {
+    const [e, m] = results.map(x => (x.status === "fulfilled" ? x.value : null));
+    if (!e) {
+      node.innerHTML = '<p class="empty failed">讀不到 enrollment.json。</p>';
       return;
     }
-    const rows = snaps.map(s => "<tr>" +
-      "<td>" + esc(s.date) + "</td>" +
-      "<td>" + esc(s.semester) + "</td>" +
-      '<td class="num">' + num(s.enrolled_total) + "</td>" +
-      '<td class="num">' + num(s.withdrawn_total) + "</td>" +
-      '<td class="num">' + num(s.course_count) + "</td>" +
-      "<td>" + (s.path ? '<a href="' + esc(s.path) + '">逐課</a>' : "") + "</td>" +
+    const latest = m && m.latest;
+    const snaps = (e.snapshots || [])
+      .filter(x => !latest || x.semester === latest)
+      .slice()
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+
+    if (!snaps.length) {
+      node.innerHTML = '<p class="empty">' +
+        (latest ? esc(latest) + " 還沒有人數快照。" : "還沒有人數快照。") + "</p>";
+      return;
+    }
+
+    const newest = snaps[0];
+    const headline = esc(newest.semester) + " 最新 <strong>" +
+      num(newest.enrolled_total) + "</strong> 人次修課" +
+      (newest.withdrawn_total
+        ? "、" + num(newest.withdrawn_total) + " 人次撤選" : "") +
+      '(' + esc(newest.date) + ",共 " + num(snaps.length) + " 天的快照)";
+
+    // 學期欄拿掉了 —— 過濾之後整欄都是同一個值,留著只是佔空間。
+    const rows = snaps.map(x => "<tr>" +
+      "<td>" + esc(x.date) + "</td>" +
+      '<td class="num">' + num(x.enrolled_total) + "</td>" +
+      '<td class="num">' + num(x.withdrawn_total) + "</td>" +
+      '<td class="num">' + num(x.course_count) + "</td>" +
+      "<td>" + (x.path ? '<a href="' + esc(x.path) + '">逐課</a>' : "") + "</td>" +
       "</tr>").join("");
 
-    node.innerHTML =
+    node.innerHTML = '<details class="section"><summary>' + headline + "</summary>" +
       '<div class="tablewrap"><table><thead><tr>' +
-      "<th>日期</th><th>學期</th><th>修課人次</th><th>撤選</th><th>課程</th><th></th>" +
+      "<th>日期</th><th>修課人次</th><th>撤選</th><th>課程</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
       '<p class="dim" style="font-size:.85rem">日期是台北時區,執行時間是 UTC ——' +
-      "跨日的邊界上兩者可能差一天。</p>";
+      "跨日的邊界上兩者可能差一天。</p></details>";
   });
 }
 
