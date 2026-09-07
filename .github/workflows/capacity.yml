@@ -28,7 +28,7 @@ concurrency:
 jobs:
   capacity:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
 
@@ -48,7 +48,7 @@ jobs:
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json runs.json; do
+            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
                 echo "已還原 $f($(stat -c%s "data/$f") bytes)"

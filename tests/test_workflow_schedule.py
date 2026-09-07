@@ -17,8 +17,9 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-BACKFILL = ROOT / ".github" / "workflows" / "backfill.yml"
-CAPACITY = ROOT / ".github" / "workflows" / "capacity.yml"
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+BACKFILL = WORKFLOWS_DIR / "backfill.yml"
+CAPACITY = WORKFLOWS_DIR / "capacity.yml"
 
 #: 守門步驟的 id。後面每一個步驟都必須引用它的輸出。
 GUARD_ID = "remaining"
@@ -112,3 +113,37 @@ class TestCapacityWorkflow:
 
     def test_actually_asks_for_capacity(self) -> None:
         assert "--with-capacity" in CAPACITY.read_text(encoding="utf-8")
+
+
+class TestCapacityRestoredEverywhere:
+    """漏還原 capacity.json 的後果不是「這次抓不到」,是安靜地用空值蓋掉
+    全站的教室容量:crawler.main 的 crawl_capacity 靠 read_capacity(out_dir)
+    帶入上一次的結果,crawler.output 的 write_classrooms 也靠它決定
+    classrooms.json 裡每個房間的 capacity —— 沒有還原,兩邊拿到的都是空字典。
+
+    逐一列出 workflow 檔名的話,以後新增一支忘記還原也不會被抓到,所以
+    改成掃過 `.github/workflows/*.yml` 裡每一個真的有
+    「Restore shared index files」步驟的檔案。
+    """
+
+    def restore_steps(self) -> list[tuple[Path, dict]]:
+        found: list[tuple[Path, dict]] = []
+        for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job in (doc.get("jobs") or {}).values():
+                for step in job.get("steps") or []:
+                    if "Restore shared index files" in (step.get("name") or ""):
+                        found.append((path, step))
+        return found
+
+    def test_there_are_restore_steps_to_check(self) -> None:
+        """保護測試本身:掃描邏輯壞掉、找不到任何 restore 步驟的話,
+        底下的迴圈會什麼都不驗證就安靜通過。"""
+        assert len(self.restore_steps()) >= 4
+
+    def test_every_restore_step_also_restores_capacity_json(self) -> None:
+        for path, step in self.restore_steps():
+            assert "capacity.json" in step.get("run", ""), (
+                f"{path.name} 的 Restore shared index files 沒有還原 "
+                "capacity.json,下一次發布會用空值覆蓋掉全站的教室容量"
+            )
