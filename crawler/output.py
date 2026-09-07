@@ -1240,12 +1240,38 @@ def _diff_fields(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
     異動洗掉。那不是學校動了資料,是我們加了欄位。
 
     欄位消失時同理(改了程式而不是學校改了課),一樣不報。
+
+    **巢狀結構同一條規則。** `time_slots` 是 list[dict],它的鍵完全由
+    `TimeSlot.to_dict()` 決定 —— 也就是由我們自己的程式決定。直接比整個
+    結構的話,哪天在裡面多掛一個鍵(例如把教室掛進節次),舊索引的每一筆都
+    會跟新的不相等,全校有排課的課一次全部變成 course_changed。所以比對交給
+    `_differs()`,它逐層只比兩邊都描述到的東西。
     """
     return {
         field: {"from": before[field], "to": after[field]}
         for field in _TRACKED_FIELDS
-        if field in before and field in after and before[field] != after[field]
+        if field in before and field in after and _differs(before[field], after[field])
     }
+
+
+def _differs(before: Any, after: Any) -> bool:
+    """兩個值是否真的不同 —— **逐層只比兩邊都描述到的東西**。
+
+    - dict:只比兩邊都有的鍵。單邊才有的鍵是程式改了形狀,不是資料變了。
+    - list:長度不同就是真的變了(少一天課是調課);長度相同才逐項往下比。
+    - 其他:直接比。
+
+    代價是「學校自己把巢狀鍵拿掉」也會被忽略。這跟頂層那條規則是同一個
+    取捨 —— 這些鍵是我們產生的,學校動不到它們。
+    """
+    if isinstance(before, dict) and isinstance(after, dict):
+        shared = before.keys() & after.keys()
+        return any(_differs(before[key], after[key]) for key in shared)
+    if isinstance(before, list) and isinstance(after, list):
+        if len(before) != len(after):
+            return True
+        return any(_differs(b, a) for b, a in zip(before, after))
+    return before != after
 
 
 def _append_events(
