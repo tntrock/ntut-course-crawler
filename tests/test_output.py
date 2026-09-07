@@ -877,6 +877,84 @@ class TestSchemaEvolutionIsNotAChange:
         ]
         assert [e["id"] for e in changed] == [target.id]
 
+    # -- 巢狀結構 -----------------------------------------------------------
+    #
+    # 上面那幾個測試守的是頂層欄位。`time_slots` 是 list[dict],它的鍵
+    # (day / day_name / periods)完全由 TimeSlot.to_dict() 決定 —— 也就是
+    # 由我們自己的程式決定。哪天在裡面多掛一個鍵,舊索引的每一筆都會跟新的
+    # 不相等,全校有排課的課會一次全部變成 course_changed,跟 language 那次
+    # 一模一樣,只是深了一層。
+
+    @staticmethod
+    def _edit_baseline_slots(tmp_path, mutate):
+        """改寫上一輪索引裡每一個 time_slot,模擬索引的巢狀結構長得不一樣。"""
+        path = tmp_path / "index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        touched = 0
+        for entry in index["courses"]:
+            for slot in entry.get("time_slots") or []:
+                mutate(slot)
+                touched += 1
+        assert touched, "fixture 裡沒有任何排課,這個測試等於沒測到東西"
+        path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+
+    def test_a_key_added_inside_time_slots_is_not_a_change(self, tmp_path, full):
+        """在 TimeSlot 裡多掛一個鍵,是我們改了程式,不是學校調了課。"""
+        write_outputs(full(), tmp_path)
+        before = len(read(tmp_path / "changes.json")["events"])
+
+        # 上一輪的索引還沒有那個鍵,這一輪有
+        self._edit_baseline_slots(tmp_path, lambda slot: slot.pop("day_name", None))
+
+        write_outputs(full(), tmp_path)
+
+        assert len(read(tmp_path / "changes.json")["events"]) == before
+
+    def test_a_key_dropped_inside_time_slots_is_not_a_change(self, tmp_path, full):
+        """反過來也一樣 —— 把 TimeSlot 的鍵拿掉同樣是改程式。"""
+        write_outputs(full(), tmp_path)
+        before = len(read(tmp_path / "changes.json")["events"])
+
+        # 上一輪的索引多一個鍵,這一輪沒有
+        self._edit_baseline_slots(tmp_path, lambda slot: slot.update(classroom="三教307"))
+
+        write_outputs(full(), tmp_path)
+
+        assert len(read(tmp_path / "changes.json")["events"]) == before
+
+    def test_a_real_change_inside_time_slots_still_reports(self, tmp_path, full):
+        """別修過頭 —— 兩邊都有的鍵真的變了,還是要報。"""
+        write_outputs(full(), tmp_path)
+
+        self._edit_baseline_slots(tmp_path, lambda slot: slot.update(periods=["9"]))
+
+        write_outputs(full(), tmp_path)
+
+        changed = [
+            e for e in read(tmp_path / "changes.json")["events"]
+            if e["type"] == "course_changed"
+        ]
+        assert changed, "節次真的改了卻沒報"
+        assert all("time_slots" in e["changes"] for e in changed)
+
+    def test_a_different_number_of_time_slots_still_reports(self, tmp_path, full):
+        """少一天課是真的調課,不是程式改了形狀。"""
+        write_outputs(full(), tmp_path)
+
+        path = tmp_path / "index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        target = next(e for e in index["courses"] if e.get("time_slots"))
+        target["time_slots"] = []
+        path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+
+        write_outputs(full(), tmp_path)
+
+        changed = [
+            e for e in read(tmp_path / "changes.json")["events"]
+            if e["type"] == "course_changed"
+        ]
+        assert [e["id"] for e in changed] == [target["id"]]
+
 
 class TestAtomicWrites:
     """寫檔是先寫暫存檔再 rename。
