@@ -281,6 +281,75 @@ def test_4xx_does_not_count_towards_the_circuit(tmp_path, no_sleep):
     assert f.consecutive_failures == 0
 
 
+def test_a_4xx_in_between_resets_the_failure_streak(tmp_path, no_sleep, monkeypatch):
+    """4xx 是對方**回應了** —— 它證明站台活著,連續失敗要從頭算。
+
+    沒有這條,「連不上、連不上、404、連不上」會累積成 UNAVAILABLE_AFTER,
+    斷路器跳開、整輪抓取中止 —— 而中間那個 404 正好說明學校還在。
+    """
+    monkeypatch.setattr(Fetcher._request.retry, "wait", wait_none())
+
+    state = {"dead": True}
+
+    class SwitchableSession(FakeSession):
+        def get(self, url, **kwargs):
+            self.calls.append(url)
+            if state["dead"]:
+                raise requests.ConnectTimeout("connect timed out")
+            return FakeResponse(b"", status=404)
+
+    f = Fetcher(cache_dir=tmp_path, use_cache=False, session=SwitchableSession())
+
+    for n in range(UNAVAILABLE_AFTER - 1):
+        with pytest.raises(requests.ConnectionError):
+            f.fetch("Subj.jsp", params={"code": str(n)})
+    assert f.consecutive_failures == UNAVAILABLE_AFTER - 1
+
+    state["dead"] = False
+    with pytest.raises(ClientError):
+        f.fetch("Subj.jsp", params={"code": "answered"})
+    assert f.consecutive_failures == 0, "對方回了 4xx,連續失敗該歸零"
+
+    state["dead"] = True
+    with pytest.raises(requests.ConnectionError):
+        f.fetch("Subj.jsp", params={"code": "dead-again"})
+    assert not f.unavailable, "中間有一次回應過,不該判定整站不可用"
+
+
+def test_a_4xx_still_pays_the_delay(tmp_path, no_sleep):
+    """發了請求就要等。限速沒有「除非對方回 4xx」這種例外。
+
+    學校哪天把某個單位的頁面撤掉,那一整批就會是 4xx —— 原本會零間隔
+    連續打過去,那是 plan.md 寫死的紅線。
+    """
+    f = Fetcher(
+        delay=0.7,
+        cache_dir=tmp_path,
+        use_cache=False,
+        session=FakeSession(FakeResponse(b"", status=404)),
+    )
+
+    with pytest.raises(ClientError):
+        f.fetch("Subj.jsp", params={"code": "1"})
+
+    assert no_sleep == [0.7]
+
+
+def test_a_4xx_is_neither_a_success_nor_an_unreachable_url(tmp_path, no_sleep):
+    """統計要誠實:4xx 不是抓到了,也不是連不上。"""
+    f = Fetcher(
+        cache_dir=tmp_path,
+        use_cache=False,
+        session=FakeSession(FakeResponse(b"", status=404)),
+    )
+
+    with pytest.raises(ClientError):
+        f.fetch("Subj.jsp", params={"code": "1"})
+
+    assert f.request_count == 0
+    assert f.failed_url_count == 0
+
+
 def test_cache_still_serves_after_the_circuit_opens(tmp_path, no_sleep, monkeypatch):
     """已經抓好的頁面沒有理由跟著陪葬。"""
     monkeypatch.setattr(Fetcher._request.retry, "wait", wait_none())
