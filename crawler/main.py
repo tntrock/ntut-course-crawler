@@ -30,6 +30,7 @@ from .config import SCHEMA_VERSION
 from .http import Fetcher, SiteUnavailable
 from .models import ClassGroup, Course, Department, Semester
 from .output import (
+    _safe_id,
     append_errors,
     classroom_url,
     is_frozen_semester,
@@ -435,10 +436,20 @@ def select_capacity_targets(
     picked: list[str] = []
     for code in sorted(targets):
         entry = known.get(code)
-        if entry is not None:
+        # known 的形狀沒有逐筆驗證過(read_capacity 只保證最外層是 dict),
+        # 壞掉的舊資料可能讓 known.get(code) 回傳非 dict 的垃圾值 —— 這裡要
+        # 能容忍而不炸掉。跟 main.py 的 crawl_capacity()、output.py 的
+        # _write_classrooms() 用同一個慣例(isinstance 檢查)。
+        if isinstance(entry, dict):
             stamp = _parse_stamp(entry.get("checked_at"))
             # 時間讀不懂就當作該重抓 —— 最壞是多抓一次,不會漏抓
             if stamp is not None:
+                if stamp.tzinfo is None:
+                    # 沒有時區資訊的字串(缺 Z)視為 UTC,跟
+                    # output.py 的 read_semester_times() 同一個慣例 ——
+                    # 不然下面的 `now - stamp` 會因為一邊 aware、
+                    # 一邊 naive 直接炸掉。
+                    stamp = stamp.replace(tzinfo=timezone.utc)
                 age = (now - stamp).total_seconds() / 3600
                 if age < refresh_after:
                     continue
@@ -460,6 +471,12 @@ def crawl_capacity(
 
     一次失敗只影響一間教室:記進 errors.json、不寫進狀態檔,下次執行會自動
     重試(因為它仍然「不在狀態檔裡」)。**不要讓一間教室的版面問題中斷整批。**
+
+    但斷路器(`SiteUnavailable`)是另一回事 —— 那代表學校端整個不可用,
+    跟單一頁面的版面問題不一樣。這裡跟 `crawl_syllabi()` 的處理方式一致:
+    記一筆錯誤後直接停止這一批,不要再對已經判定不可用的站台繼續發請求。
+    呼叫端(`main()`)要用回傳的統計數字判斷「整批都沒抓到」,回傳非 0 的
+    離開碼讓 workflow 的重試迴圈真正發動。
     """
     out_dir = Path(out_dir)
     known = read_capacity(out_dir)
@@ -477,7 +494,25 @@ def crawl_capacity(
 
     for index, code in enumerate(picked, start=1):
         name, year, sem = targets[code]
-        url = classroom_url(code, year, sem)
+        # 跟 output.py 的 _write_classrooms() 用同一條規則:代碼要先驗過
+        # 才能拿去組 URL / 檔名。這裡雖然只用來組 URL(不落地成檔名),但
+        # 同一個代碼、同一個信任邊界,兩處都該擋。
+        safe = _safe_id(code, "教室")
+        if safe is None:
+            errors.append(
+                {
+                    "stage": "classroom",
+                    "classroom_id": code,
+                    "classroom_name": name,
+                    "url": None,
+                    "error": "教室代碼不合法,略過",
+                    "year": year,
+                    "sem": sem,
+                }
+            )
+            failed += 1
+            continue
+        url = classroom_url(safe, year, sem)
         if index % 50 == 0:
             log.info("教室容量:%d / %d", index, len(picked))
         try:
@@ -500,6 +535,11 @@ def crawl_capacity(
                 }
             )
             failed += 1
+            if isinstance(exc, SiteUnavailable):
+                # 斷路器已經跳開,再繼續打剩下的教室只是白費(而且會被
+                # Fetcher 每次都立刻拒絕)。停在這裡,已經抓好的保留。
+                log.error("站台已判定不可用,停止抓教室容量;已抓好的保留")
+                break
             continue
 
         # known 的形狀沒有逐筆驗證過(read_capacity 只保證最外層是 dict),
@@ -1020,8 +1060,9 @@ def main(argv: list[str] | None = None) -> int:
 
         snapshot()
 
+    capacity_stats: dict[str, int] | None = None
     if args.with_capacity:
-        crawl_capacity(
+        capacity_stats = crawl_capacity(
             fetcher,
             args.out,
             limit=args.max_capacity or None,
@@ -1050,6 +1091,22 @@ def main(argv: list[str] | None = None) -> int:
         log.error("所有指定的學期都抓取失敗")
         snapshot(1)
         return 1
+
+    # 教室容量整批失敗(通常是斷路器跳開)也算整體失敗 —— 不然這裡一路
+    # 回 0,workflow 的 until 重試迴圈永遠不會發動,一次網路中斷就會被
+    # 誤判成成功發布。「有抓到一些」不算整批失敗,只要有部分成果就發布。
+    if (
+        capacity_stats is not None
+        and capacity_stats["failed"] > 0
+        and capacity_stats["fetched"] == 0
+    ):
+        log.error(
+            "教室容量整批抓取失敗(%d 間全部失敗、一間都沒成功)",
+            capacity_stats["failed"],
+        )
+        snapshot(1)
+        return 1
+
     snapshot(0)
     return 0
 
