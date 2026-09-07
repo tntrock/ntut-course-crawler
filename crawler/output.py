@@ -132,6 +132,28 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     write_errors(result, out_dir, pretty)
 
 
+def write_classrooms(
+    result: "CrawlResult", out_dir: Path, *, pretty: bool = False
+) -> None:
+    """只重寫本學期的 `classrooms.json`。
+
+    是公開的,因為抓完教室容量之後要單獨再寫一次。`_write_classrooms()` 的
+    容量是從 `capacity.json` 讀來的,而 `write_outputs()` 執行的當下那個檔
+    還是**上一輪**的內容 —— 容量抓取排在課表之後。不補這一次,每學期的
+    classrooms.json 就永遠落後容量一輪。
+
+    第一次上線就踩到了:capacity.json 寫進 216 間的實際座位數,同一次跑
+    產生的 `115-1/classrooms.json` 卻只有 1 間有值。
+
+    跟 `write_errors()` 一樣,**不要改回呼叫 `write_outputs()`** —— 它會連
+    `changes.json` 一起重跑,而那個檔是追加語義,同一筆 baseline 會記兩遍。
+    """
+    out_dir = Path(out_dir)
+    semester_dir = out_dir / result.semester
+    semester_dir.mkdir(parents=True, exist_ok=True)
+    _write_classrooms(result, semester_dir, out_dir, pretty)
+
+
 def _clean_rebuilt_dirs(semester_dir: Path) -> None:
     for name in _REBUILT_SUBDIRS:
         target = semester_dir / name

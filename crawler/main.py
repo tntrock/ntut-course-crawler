@@ -40,6 +40,7 @@ from .output import (
     read_syllabus_frozen,
     read_syllabus_state,
     write_capacity,
+    write_classrooms,
     write_errors,
     write_outputs,
     write_semester_failure,
@@ -1069,6 +1070,14 @@ def main(argv: list[str] | None = None) -> int:
             refresh_after=args.capacity_refresh_after,
             pretty=args.pretty,
         )
+        # 容量是**這一步**才抓到的,但各學期的 classrooms.json 是上面
+        # write_outputs() 寫的,那時讀到的還是上一輪的 capacity.json。
+        # 補寫一次,讓同一次執行產出的資料自洽 —— 不然使用者會看到
+        # capacity.json 有值、學期檔卻整排 null,要等下一班 crawl 才對得起來。
+        #
+        # 只重寫 classrooms.json,理由見 write_classrooms() 的說明。
+        for result in results:
+            write_classrooms(result, args.out, pretty=args.pretty)
 
     _print_summary(results, fetcher, args.out)
 

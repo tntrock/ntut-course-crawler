@@ -8,18 +8,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 
 from crawler.http import SiteUnavailable
 from crawler.main import (
     DEFAULT_CAPACITY_REFRESH_AFTER,
     classroom_targets,
     crawl_capacity,
+    main,
     select_capacity_targets,
     crawl,
 )
 from crawler.output import read_capacity, write_capacity, write_outputs
 from tests.conftest import load_fixture
-from tests.test_main import FakeFetcher
+from tests.test_main import FakeFetcher, fake_fetcher_factory  # noqa: F401
 
 
 def read(path):
@@ -417,3 +419,65 @@ class TestEndpointsListed:
         write_outputs(crawl(FakeFetcher(), 115, 1, only_departments=["59"]), tmp_path)
         paths = [e["path"] for e in read(tmp_path / "meta.json")["endpoints"]]
         assert "capacity.json" in paths
+
+
+class TestClassroomsJsonCarriesThisRunsCapacity:
+    """`--with-capacity` 跑完,各學期的 classrooms.json 要帶**這次**抓到的容量。
+
+    修好之前 main() 的順序是反的:先 `write_outputs()`(裡面的
+    `_write_classrooms()` 去讀 capacity.json)才 `crawl_capacity()`
+    (寫 capacity.json)。於是學期檔永遠帶著上一輪的容量。
+
+    第一次上線就踩到了:capacity.json 有 216 間的實際座位數,
+    `115-1/classrooms.json` 卻只有 1 間有值 —— 因為那一輪讀到的是前一次
+    測試跑的 5 間狀態檔。要等下一班 crawl 才補得回來。
+    """
+
+    def fake_capacity_crawl(self, tmp_path):
+        """假裝容量抓取跑完並寫了狀態檔,回傳可餵給 monkeypatch 的函式。"""
+
+        def run(fetcher, out_dir, **kwargs):
+            write_capacity(Path(out_dir), {
+                "434": {"name": "六教427(e)", "full_name": "第六教學大樓427室",
+                        "capacity": 50, "checked_at": "2026-09-07T02:00:00Z"},
+            })
+            return {"fetched": 1, "changed": 0, "failed": 0}
+
+        return run
+
+    def test_capacity_lands_in_the_same_run(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "crawler.main.crawl_capacity", self.fake_capacity_crawl(tmp_path)
+        )
+        main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--dept", "59", "--with-capacity", "--log-level", "CRITICAL",
+        ])
+        rooms = {
+            r["id"]: r
+            for r in read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
+        }
+        assert "434" in rooms, "測試前提:假課表裡要有教室 434"
+        assert rooms["434"]["capacity"] == 50, (
+            "classrooms.json 沒帶到這次抓到的容量,又落後一輪了"
+        )
+
+    def test_without_the_flag_nothing_extra_is_written(
+        self, tmp_path, fake_fetcher_factory, monkeypatch
+    ):
+        """沒開 `--with-capacity` 就不該有補寫這一步 —— 那是白做工。"""
+        calls = []
+        real = __import__(
+            "crawler.output", fromlist=["write_classrooms"]
+        ).write_classrooms
+        monkeypatch.setattr(
+            "crawler.main.write_classrooms",
+            lambda *a, **k: (calls.append(a), real(*a, **k))[1],
+        )
+        main([
+            "--year", "115", "--sem", "1", "--out", str(tmp_path),
+            "--dept", "59", "--log-level", "CRITICAL",
+        ])
+        assert calls == []
