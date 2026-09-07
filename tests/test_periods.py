@@ -69,7 +69,7 @@ class TestPeriodTable:
 class TestRequirementSymbols:
     @pytest.mark.parametrize("symbol", ["★", "☆"])
     def test_both_stars_are_elective(self, symbol):
-        """★ 與 ☆ 都是「選」,差別在專業 / 共同(plan.md §7 已解決事項)。"""
+        """★ 與 ☆ 都是「選」,差別在專業 / 共同(reference.md「站台結構」)。"""
         required, _ = REQUIREMENT_SYMBOLS[symbol]
         assert required is False
 

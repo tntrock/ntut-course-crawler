@@ -67,7 +67,7 @@ def test_delay_defaults_to_one_second(monkeypatch):
 
 
 def test_delay_floor_cannot_be_bypassed_by_argument():
-    """plan.md §1.4:下限 0.5 秒,不得為了加速而放寬。"""
+    """reference.md「抓取禮儀」:下限 0.5 秒,不得為了加速而放寬。"""
     assert resolve_delay(0) == MIN_DELAY
     assert resolve_delay(-5) == MIN_DELAY
     assert resolve_delay(0.1) == MIN_DELAY
@@ -320,7 +320,7 @@ def test_a_4xx_still_pays_the_delay(tmp_path, no_sleep):
     """發了請求就要等。限速沒有「除非對方回 4xx」這種例外。
 
     學校哪天把某個單位的頁面撤掉,那一整批就會是 4xx —— 原本會零間隔
-    連續打過去,那是 plan.md 寫死的紅線。
+    連續打過去,那是 reference.md 寫死的紅線。
     """
     f = Fetcher(
         delay=0.7,

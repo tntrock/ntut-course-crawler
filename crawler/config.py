@@ -41,13 +41,13 @@ INDEX_SEMESTERS = 2
 #: - 本機開發時可 `export GITHUB_REPOSITORY=yourname/ntut-course-crawler` 覆寫。
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY") or "UNSET/ntut-course-crawler"
 
-#: User-Agent 必須有辨識度並附聯絡方式(plan.md §1.4 硬性規定)
+#: User-Agent 必須有辨識度並附聯絡方式(reference.md「抓取禮儀」硬性規定)
 USER_AGENT = f"ntut-course-crawler/{__version__} (+https://github.com/{GITHUB_REPOSITORY})"
 
 #: 每次請求後的固定延遲(秒)。可由環境變數 CRAWL_DELAY 或 CLI --delay 覆寫。
 DEFAULT_DELAY = 1.0
 
-#: 延遲下限。**不得為了加快速度而調低**(plan.md §1.4 / §5.2)。
+#: 延遲下限。**不得為了加快速度而調低**(reference.md「抓取禮儀」)。
 MIN_DELAY = 0.5
 
 #: (connect timeout, read timeout)

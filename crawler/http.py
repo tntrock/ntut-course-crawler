@@ -3,7 +3,7 @@
 其他模組(尤其是 parse_*.py)一律不得自行連網。這樣限速、快取、重試
 的規則只要在這裡守住,整個專案就守住了。
 
-plan.md §1.4 的硬性規定在這裡實作:
+reference.md「抓取禮儀」的硬性規定在這裡實作:
 - 單執行緒,不平行抓取
 - 每次真正發出請求後強制 sleep(下限 0.5 秒)
 - User-Agent 帶辨識與聯絡方式
@@ -35,16 +35,17 @@ log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# SSL:必須在 import requests 之前注入 truststore(plan.md §1.5)
+# SSL:必須在 import requests 之前注入 truststore(reference.md「憑證」)
 #
 # 學校憑證缺少 Subject Key Identifier,OpenSSL 3.x 嚴格模式會擋掉,但
 # curl(schannel)與瀏覽器都能通過。truststore 讓 Python 改用作業系統
 # 憑證庫驗證,行為與瀏覽器一致 —— 這是「解掉」而不是 verify=False 那種
 # 「蓋掉」。
 #
-# ❓plan.md §7-3:Linux + Python 3.12 可能根本不需要,也可能反而出錯。
-# 因此這裡做成「盡力注入,失敗就記 warning 繼續」,並提供環境變數
-# NTUT_DISABLE_TRUSTSTORE=1 可完全停用。
+# CI(Linux + Python 3.12)已驗過注入正常、不需要分支處理,見
+# reference.md「憑證」。但仍然做成「盡力注入,失敗就記 warning 繼續」,
+# 並留 NTUT_DISABLE_TRUSTSTORE=1 可完全停用 —— 這裡是全專案唯一的網路
+# 入口,為了一個環境相依的最佳化而讓整支爬蟲起不來並不划算。
 # --------------------------------------------------------------------------
 def _inject_truststore() -> bool:
     if os.environ.get("NTUT_DISABLE_TRUSTSTORE") == "1":

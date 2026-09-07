@@ -66,7 +66,11 @@ jobs:
     # boolean 取消勾選,它的值是 false,那種寫法會讀成「沒給」而套用預設,
     # 於是使用者明確關掉的選項又被打開 —— 安靜地做了沒被要求的事。
     env:
-      YEARS: ${{ github.event_name == 'schedule' && '96-113' || inputs.years }}
+      # 下界是 90 —— 學校首頁列到的最舊學年度。原本寫 96 是因為當時認定
+      # 95-2 以前的大綱是空殼,那個結論後來實抓推翻了(95-2 的體育、92-1 的
+      # 高等專題都有 outline / schedule / materials 的實際內容),只是填的
+      # 人少:90-1 有 17 門、95-2 有 298 門,12 個學期合計 963 門有連結。
+      YEARS: ${{ github.event_name == 'schedule' && '90-113' || inputs.years }}
       WITH_SYLLABUS: ${{ github.event_name == 'schedule' && 'true' || inputs.with_syllabus }}
       DELAY: ${{ github.event_name == 'schedule' && '0.5' || inputs.delay }}
       MAX_SEMESTERS: ${{ github.event_name == 'schedule' && '6' || inputs.max_semesters }}

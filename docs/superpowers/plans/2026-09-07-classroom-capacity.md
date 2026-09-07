@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-以下取自 `plan.md` 的硬性規定與本專案既有慣例，**每個任務都適用**：
+以下取自 `reference.md`（當時叫 `plan.md`）的硬性規定與本專案既有慣例，**每個任務都適用**：
 
 - **單執行緒**，不使用 `threading` / `asyncio` / `multiprocessing` 平行抓取。
 - 每次請求後 sleep，**下限 0.5 秒**，不得調低。抓取一律走既有的 `Fetcher`。

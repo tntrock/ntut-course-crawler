@@ -67,7 +67,7 @@ class TestFixtureCourses:
         assert all(c.name_zh != "小計" and c.id != "小計" for c in courses)
 
     def test_flagship_course_fields(self, by_id):
-        """plan.md 指定的驗收條件。"""
+        """reference.md 記錄的實測結果。"""
         c = by_id["364893"]
         assert c.name_zh == "數位影像處理"
         assert c.credits == 3.0
@@ -153,7 +153,7 @@ class TestFixtureCourses:
         assert by_id["364892"].time_slots[0].periods == ["8", "9", "A"]
 
     def test_english_name_has_no_source(self, courses):
-        """plan.md §7-2:課程列表頁與教學大綱頁都沒有英文課名。"""
+        """reference.md「站台結構」:課程列表頁與教學大綱頁都沒有英文課名。"""
         assert all(c.name_en is None for c in courses)
 
 

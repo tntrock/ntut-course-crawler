@@ -1249,4 +1249,4 @@ web/                # 發布到 gh-pages 根目錄的頁面,整個目錄由 work
 解析器一律是**純函式**：吃 HTML 字串 → 吐 dataclass，不發網路請求。
 所有網路存取都集中在 `http.py`，限速與快取的規則只要在那裡守住就守住了。
 
-完整的開發規格與偵察紀錄見 [`plan.md`](plan.md)。
+要改這個 repo 的話，硬性規定、實測過的站台特性與決策紀錄見 [`reference.md`](reference.md)。

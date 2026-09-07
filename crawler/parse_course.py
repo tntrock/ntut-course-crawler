@@ -3,7 +3,7 @@
 純函式:吃 HTML 字串 → 吐 dataclass,不發任何網路請求。
 
 版面特性全部來自 tests/fixtures/course_list_real.html 的實測結果,
-不是憑印象寫的(plan.md §5.4)。
+不是憑印象寫的(reference.md「不要猜 HTML」)。
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def _course_from_cells(course_id: str, cells: list, class_name: str | None) -> C
     return Course(
         id=course_id,
         name_zh=clean(cells[COL_NAME].get_text()) or "",
-        # 課程列表頁與教學大綱頁都沒有英文課名,目前無來源(plan.md §7-2)
+        # 課程列表頁與教學大綱頁都沒有英文課名,目前無來源(reference.md「站台結構」)
         name_en=None,
         stage=clean(cells[COL_STAGE].get_text()),
         credits=_number(cells[COL_CREDITS], float, course_id, "學分"),
