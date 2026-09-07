@@ -31,6 +31,7 @@ PUBLISHED_JSON = {
     "changes.json",
     "enrollment.json",
     "syllabus.json",
+    "capacity.json",
 }
 
 PAGES = ["index.html", "status.html", "errors.html", "changes.html"]
@@ -199,6 +200,7 @@ STATUS_SOURCES = {
     "enrollment.json",
     "runs.json",
     "errors.json",
+    "capacity.json",
 }
 
 

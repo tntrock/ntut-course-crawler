@@ -56,6 +56,9 @@
 <h2>修課人數快照</h2>
 <div id="enrollment"><p class="empty">讀取中…</p></div>
 
+<h2>教室容量</h2>
+<div id="capacity"><p class="empty">讀取中…</p></div>
+
 <footer>
   課程資料本身走 <a href="index.json">index.json</a> 與各學期端點,清單見
   <a href="index.html">首頁</a>。這頁刻意不載入 index.json —— 它有 1.8 MB,
@@ -110,6 +113,7 @@ function render() {
   const errors = loadJSON("errors.json");
   const syllabus = loadJSON("syllabus.json");
   const enrollment = loadJSON("enrollment.json");
+  const capacity = loadJSON("capacity.json");
 
   // ---- 健康燈號 ----
   block("health", Promise.all([runs, meta]), (node, [r, m]) => {
@@ -345,6 +349,78 @@ function render() {
       ",日期是台北時區、執行時間是 UTC —— 跨日的邊界上兩者可能差一天。</p>";
 
     collapsibleRows(node, 3, n => "顯示其餘 " + n + " 天");
+  });
+
+  // ---- 教室容量 ----
+  //
+  // 這裡的重點是**涵蓋率**,不是總數。全量實測 445 間裡只有 216 間查得到
+  // 座位數 —— 其餘 229 間學校根本沒登記(那格連同使用率欄位一起空白,
+  // 打四個不同學年期都一樣)。只顯示「445 間」會讓人以為每間都有值。
+  //
+  // 依館別拆開才看得出這不是隨機的:一般教學大樓幾乎都有,研究與系館
+  // 幾乎都沒有。那也是判斷「這次是不是抓歪了」最快的方式 —— 平常滿格的
+  // 館別忽然掉下來,就是版面出事了。
+  block("capacity", capacity, (node, c) => {
+    const rooms = c.classrooms || {};
+    const ids = Object.keys(rooms);
+    if (!ids.length) {
+      node.innerHTML = '<p class="empty">還沒有教室容量資料。</p>';
+      return;
+    }
+
+    const entries = ids.map(id => rooms[id]).filter(x => x && typeof x === "object");
+    const withValue = entries.filter(x => typeof x.capacity === "number");
+    const sizes = withValue.map(x => x.capacity).sort((a, b) => a - b);
+    const checked = entries
+      .map(x => x.checked_at)
+      .filter(Boolean)
+      .sort();
+    const last = checked.length ? checked[checked.length - 1] : null;
+
+    const pct = entries.length
+      ? Math.round((withValue.length / entries.length) * 100) : 0;
+
+    // 教室名稱的中文前綴就是館別(「三教202(e)」→「三教」)。
+    const buckets = {};
+    entries.forEach(x => {
+      const match = /^[^0-9]+/.exec(x.name || "");
+      const key = match ? match[0].trim() : "(其他)";
+      const slot = buckets[key] || (buckets[key] = { total: 0, ok: 0 });
+      slot.total += 1;
+      if (typeof x.capacity === "number") slot.ok += 1;
+    });
+
+    const rows = Object.keys(buckets)
+      .sort((a, b) => buckets[b].total - buckets[a].total)
+      .map(name => {
+        const b = buckets[name];
+        const share = Math.round((b.ok / b.total) * 100);
+        return "<tr>" +
+          "<td>" + esc(name) + "</td>" +
+          '<td class="num">' + num(b.ok) + "</td>" +
+          '<td class="num">' + num(b.total) + "</td>" +
+          '<td class="num">' + share + "%</td>" +
+          "</tr>";
+      }).join("");
+
+    node.innerHTML =
+      '<div class="health ' + (withValue.length ? "ok" : "unknown") + '"><b>' +
+      num(withValue.length) + " / " + num(entries.length) + " 間查得到座位數(" +
+      pct + "%)</b><span>" +
+      (sizes.length
+        ? "容量 " + num(sizes[0]) + "～" + num(sizes[sizes.length - 1]) +
+          ",中位數 " + num(sizes[Math.floor(sizes.length / 2)])
+        : "還沒有任何容量值") +
+      (last ? " · 最後確認於 " + esc(taipei(last)) + "(" + esc(relative(last)) + ")"
+            : "") +
+      "</span></div>" +
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>館別</th><th>有容量</th><th>教室數</th><th>比例</th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">空白不是抓取失敗 —— ' +
+      "學校對實驗室與系所空間多半沒有登記座位數。容量與學期無關,每月重抓一輪。</p>";
+
+    collapsibleRows(node, 8, n => "顯示其餘 " + n + " 個館別");
   });
 }
 
