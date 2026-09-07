@@ -538,6 +538,40 @@ def is_frozen_semester(year: int, sem: int, out_dir: Path) -> bool:
     return (year, sem) < max(known)
 
 
+# --------------------------------------------------------------------------
+# 教室容量
+# --------------------------------------------------------------------------
+def read_capacity(out_dir: Path) -> dict[str, dict[str, Any]]:
+    """讀 `capacity.json`,回傳 代碼 → {name, full_name, capacity, checked_at}。
+
+    檔案不存在或壞掉時回空 dict —— 最壞的結果只是重抓一輪(445 頁、約 9 分鐘),
+    不該讓整批抓取無法啟動。
+    """
+    payload = _read_json(Path(out_dir) / "capacity.json") or {}
+    classrooms = payload.get("classrooms")
+    return classrooms if isinstance(classrooms, dict) else {}
+
+
+def write_capacity(
+    out_dir: Path, classrooms: dict[str, dict[str, Any]], *, pretty: bool = False
+) -> None:
+    """寫 `capacity.json`。
+
+    **不留改建沿革** —— 值變了就直接覆蓋。使用端要的是「現在幾個座位」,
+    而學校本來就不保留歷史容量(實測改建後所有學期都會顯示新值)。
+    """
+    _write_json(
+        Path(out_dir) / "capacity.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now(),
+            "classroom_count": len(classrooms),
+            "classrooms": classrooms,
+        },
+        pretty,
+    )
+
+
 def read_syllabus_state(out_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
     """讀根目錄 `syllabus.json`,回傳 學期 → {課號: {"at": 抓取時間, "hash": 內容雜湊}}。
 
