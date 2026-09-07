@@ -257,6 +257,17 @@ dispatch 卡到排程時它會排隊而不是併發——那是刻意的。也�
 **四支 workflow 的還原步驟都要有 `*/classes.json`**——`read_class_groups()`
 讀不到就回空 dict、一切照舊，所以漏掉不會有任何測試失敗，假停開會直接回來。
 
+> **這個 bug 會在事件流上留下兩筆假事件，一前一後。** 課消失時記成停開，
+> 下一輪抓回來時又記成**加開**。2026-09-07 那次兩邊都清掉了，各是一次
+> gh-pages 的單檔提交（`data:` 開頭的 commit）：
+>
+> - 假停開 → 前一個 session 手動移除
+> - 假加開 → `scripts/drop_phantom_additions.py`
+>
+> 判定規則是「大綱在它被記成加開之前就抓過了 → 它先前就存在」，不是寫死
+> 課號。⚠️ `rebuild_changes.py` 會把這些事件放回來，跑過那支之後要接著跑
+> 這支。
+
 ### 4xx 要重設斷路器，而且一樣要 sleep
 
 `ClientError` 原本直接穿過 `fetch()`，`consecutive_failures = 0` 和
