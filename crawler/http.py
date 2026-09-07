@@ -244,6 +244,21 @@ class Fetcher:
         log.info("GET %s", full_url)
         try:
             html = self._request(full_url)
+        except ClientError:
+            # 4xx 是對方**回應了** —— 站台活著,只是這個網址有問題。所以
+            # 斷路器的連續計數要歸零:沒有這一行,「連不上、連不上、404、
+            # 連不上」會累積成 UNAVAILABLE_AFTER,整輪抓取被中止,而中間
+            # 那個 404 正好說明學校還在。
+            #
+            # 統計兩邊都不算:沒拿到東西(request_count),也不是連不上
+            # (failed_url_count)。
+            #
+            # **但該等的還是要等。** 限速沒有「除非對方回 4xx」這種例外 ——
+            # 學校哪天撤掉某個單位的頁面,那一整批都會是 4xx,原本會零間隔
+            # 連續打過去。
+            self.consecutive_failures = 0
+            time.sleep(self.delay)
+            raise
         except (ServerError, *TRANSIENT) as exc:
             self._record_failure(full_url, exc)
             raise
