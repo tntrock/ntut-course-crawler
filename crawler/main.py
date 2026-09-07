@@ -872,7 +872,20 @@ def crawl_syllabi(
         ok += 1
 
     state[result.semester] = fetched
-    totals = {result.semester: {"course_count": len(result.courses), "with_url": have}}
+    # 進度的分子是「該抓的抓了幾成」,所以只算**現在還有連結**的那些。
+    # 用狀態檔的筆數當分子會比分母大 —— 課換了老師,學校的大綱連結跟著
+    # 消失,但抓過的那筆狀態還留著(115-1 的 364666 就是這樣讓進度顯示成
+    # 1,922 / 1,921 的)。狀態本身不刪,連結哪天回來就不必重抓。
+    linked_fetched = sum(
+        1 for c in result.courses if c.syllabus_url and c.id in fetched
+    )
+    totals = {
+        result.semester: {
+            "course_count": len(result.courses),
+            "with_url": have,
+            "fetched": linked_fetched,
+        }
+    }
 
     # 收合的條件抓得很嚴:必須是歷史學期、這一輪沒被站台中斷、而且 --max-syllabus
     # 沒有把 targets 砍短(否則「跑完了」只代表跑完這一批,不代表補完了)。
