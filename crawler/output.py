@@ -119,7 +119,7 @@ def write_outputs(result: "CrawlResult", out_dir: Path, *, pretty: bool = False)
     _write_teachers(result, semester_dir, pretty)
     _write_classes(result, semester_dir, pretty)
     _write_programs(result, semester_dir, pretty)
-    _write_classrooms(result, semester_dir, pretty)
+    _write_classrooms(result, semester_dir, out_dir, pretty)
     _write_schedule(result, semester_dir, pretty)
     _write_semester_index(result, semester_dir, pretty)
     _write_enrollment_snapshot(result, semester_dir, out_dir, pretty)
@@ -425,8 +425,19 @@ def _write_programs(result: "CrawlResult", semester_dir: Path, pretty: bool) -> 
     _write_json(semester_dir / "programs.json", payload, pretty)
 
 
-def _write_classrooms(result: "CrawlResult", semester_dir: Path, pretty: bool) -> None:
-    """教室 → 課號。可以拿來找空教室,或看某間教室排了什麼課。"""
+def _write_classrooms(
+    result: "CrawlResult", semester_dir: Path, out_dir: Path, pretty: bool
+) -> None:
+    """教室 → 課號。可以拿來找空教室,或看某間教室排了什麼課。
+
+    `capacity` 取自根目錄的 `capacity.json`,**查表而已,不發任何請求**。
+    狀態檔沒有該代碼時是 `None` —— 「還沒抓過」和「零個座位」是兩回事。
+
+    注意:容量與學期無關(實測 year/sem 不影響該欄位),所以歷史學期的
+    `capacity` 反映的是**最近一次觀測值**,不是那個學期當時的容量。
+    學校不保留歷史容量,這點無法補救,README 有寫明。
+    """
+    capacity = read_capacity(out_dir)
     buckets: dict[tuple[str | None, str], list[str]] = {}
     for course in result.courses:
         for index, name in enumerate(course.classrooms):
@@ -444,6 +455,7 @@ def _write_classrooms(result: "CrawlResult", semester_dir: Path, pretty: bool) -
             {
                 "id": code,
                 "name": name,
+                "capacity": (capacity.get(code) or {}).get("capacity"),
                 "course_count": len(ids),
                 "course_ids": sorted(ids),
                 "url": classroom_url(safe, result.year, result.sem) if safe else None,

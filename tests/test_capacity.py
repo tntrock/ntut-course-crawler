@@ -14,9 +14,11 @@ from crawler.main import (
     classroom_targets,
     crawl_capacity,
     select_capacity_targets,
+    crawl,
 )
-from crawler.output import read_capacity, write_capacity
+from crawler.output import read_capacity, write_capacity, write_outputs
 from tests.conftest import load_fixture
+from tests.test_main import FakeFetcher  # noqa: F401
 
 
 def read(path):
@@ -184,3 +186,29 @@ class TestCrawlCapacity:
         self.prepare(tmp_path)
         stats = crawl_capacity(FakeCroomFetcher(), tmp_path, limit=1)
         assert stats["fetched"] == 1
+
+
+class TestClassroomsGetCapacity:
+    def result(self):
+        return crawl(FakeFetcher(), 115, 1, only_departments=["59"])
+
+    def test_capacity_is_stamped_from_the_state_file(self, tmp_path):
+        write_capacity(tmp_path, {
+            "48": {"name": "三教307(e)", "full_name": "第三教學大樓307室",
+                   "capacity": 50, "checked_at": "2026-09-07T02:00:00Z"},
+        })
+        write_outputs(self.result(), tmp_path)
+        entries = read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
+        assert all("capacity" in e for e in entries), "每一筆都要有這個欄位"
+
+    def test_unknown_classrooms_get_null_not_zero(self, tmp_path):
+        write_outputs(self.result(), tmp_path)   # 沒有狀態檔
+        entries = read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
+        assert all(e["capacity"] is None for e in entries)
+
+    def test_writing_does_not_fetch_anything(self, tmp_path):
+        """補欄位只是查表,不該發任何請求 —— no_real_network 會抓到違規。"""
+        write_capacity(tmp_path, {"48": {"name": "A", "full_name": "AA",
+                                         "capacity": 50,
+                                         "checked_at": "2026-09-07T02:00:00Z"}})
+        write_outputs(self.result(), tmp_path)   # 不拋例外就算過
