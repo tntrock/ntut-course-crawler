@@ -149,3 +149,25 @@ details.row .inner {
 
 .num { font-variant-numeric: tabular-nums; }
 .dim { color: var(--muted); }
+
+/* ---- 狀態頁:可展開的列與區塊 ---- */
+
+/* 各學期資料表把超出前幾列的先藏起來,用按鈕切換。全部列都在同一張表裡,
+   欄寬才會一致 —— 拆成兩張表就一定對不齊,而且第二張沒有表頭。 */
+tr[hidden] { display: none; }
+
+button.more {
+  font: inherit; font-size: .88rem; color: var(--fg);
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 6px; padding: .35rem .7rem; margin-top: .7rem; cursor: pointer;
+}
+button.more:hover { border-color: var(--accent); }
+
+/* 區塊層級的展開:summary 那一行就是結論,細節收在裡面。 */
+details.section > summary {
+  cursor: pointer; list-style: none; padding: .5rem 0; font-size: .95rem;
+}
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::before { content: "▸ "; color: var(--accent); }
+details.section[open] > summary::before { content: "▾ "; }
+details.section > summary:hover { color: var(--accent); }
