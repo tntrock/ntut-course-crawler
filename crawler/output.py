@@ -748,10 +748,17 @@ def write_syllabus_index(
 
     分開放是因為前者小、後者大,前端要顯示進度不必吞下幾千筆時間戳。
 
-    `totals`(共幾門 / 幾門有大綱)只會帶**這次抓過的學期** —— 呼叫端一次
-    只處理一個學期,不會知道別的學期有幾門課。所以其他學期的 totals 要從
-    舊檔沿用,否則「抓了 1909 門 / 共幾門」的分母會在下一個學期跑完之後
-    憑空消失,進度就只剩一個沒有基準的數字。
+    `totals`(共幾門 / 幾門有大綱 / 抓到幾門)只會帶**這次抓過的學期** ——
+    呼叫端一次只處理一個學期,不會知道別的學期有幾門課。所以其他學期的
+    totals 要從舊檔沿用,否則「抓了 1909 門 / 共幾門」的分母會在下一個學期
+    跑完之後憑空消失,進度就只剩一個沒有基準的數字。
+
+    ⚠️ `semesters[].fetched` 是**進度的分子**,不是「狀態檔有幾筆」。兩者
+    在課換老師時會分岔:學校的大綱連結綁在老師的大綱紀錄上,換人之後連結
+    消失,但抓過的那筆狀態還留著(刻意的,連結回來時不必重抓)。拿筆數當
+    分子會比分母大,進度顯示成 100% 以上 —— 115-1 實際出現過 1,922 / 1,921。
+    所以分子由呼叫端算好放進 `totals`,這裡沒有 totals 時才退回筆數。
+    `frozen` 學期不吃這個值:它們的 `fetched` 是收合時的定案門數。
 
     `frozen` 同理只帶**這次新收合的**學期,舊檔裡已經收合的要沿用 ——
     它們的逐課狀態已經被丟掉了,舊紀錄是唯一的依據,洗掉等於下次執行
@@ -765,7 +772,11 @@ def write_syllabus_index(
         if isinstance(entry, dict) and entry.get("semester")
     }
     previous_totals = {
-        sem: {key: entry[key] for key in ("course_count", "with_url") if key in entry}
+        sem: {
+            key: entry[key]
+            for key in ("course_count", "with_url", "fetched")
+            if key in entry
+        }
         for sem, entry in previous.items()
     }
 
@@ -802,8 +813,12 @@ def write_syllabus_index(
     semesters = []
     for sem in sorted(entries, key=_semester_key, reverse=True):
         entry = entries[sem]
-        entry.update(previous_totals.get(sem) or {})
-        entry.update(totals.get(sem) or {})
+        carried = {**(previous_totals.get(sem) or {}), **(totals.get(sem) or {})}
+        if sem in all_frozen:
+            # 收合的門數是那個學期的定案數字(狀態已經丟掉,只剩這一筆),
+            # 不能被進度的分子蓋掉 —— 那是兩個不同的東西。
+            carried.pop("fetched", None)
+        entry.update(carried)
         semesters.append(entry)
 
     payload: dict[str, Any] = {

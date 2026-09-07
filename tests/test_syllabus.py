@@ -13,7 +13,11 @@ import pytest
 
 from crawler.main import crawl, crawl_syllabi, main, select_syllabus_targets
 from crawler.models import Course
-from crawler.output import read_syllabus_state, write_syllabus_index
+from crawler.output import (
+    read_syllabus_state,
+    syllabus_done_semesters,
+    write_syllabus_index,
+)
 from crawler.parse_syllabus import parse_syllabus
 # fake_fetcher_factory 讓 main() 也用假的 Fetcher —— 測試一律不連網
 from tests.test_main import FakeFetcher, fake_fetcher_factory  # noqa: F401
@@ -187,6 +191,41 @@ class TestCrawlSyllabi:
         )
         assert by_semester["114-2"]["course_count"] == 2809
 
+    def test_a_course_that_lost_its_link_does_not_inflate_the_progress(
+        self, tmp_path, result
+    ):
+        """進度的分子是「該抓的抓了幾成」,不是「狀態檔有幾筆」。
+
+        學校的大綱連結綁在老師的大綱紀錄上,課換了老師連結就會消失。抓過的
+        那筆狀態還留著,分子於是比分母大,進度顯示成 100% 以上。
+
+        線上實際發生過:115-1 的 364666「專題討論」2026-09-07 03:34 換了老師,
+        連結跟著不見,當天的大綱班就顯示 1,922 / 1,921。
+        """
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+
+        dropped = next(c for c in result.courses if c.syllabus_url)
+        dropped.syllabus_url = None
+        # refresh_after=0:剩下的都到期,這一輪才會重寫進度
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+
+        entry = next(
+            e for e in read(tmp_path / "syllabus.json")["semesters"]
+            if e["semester"] == "115-1"
+        )
+        assert entry["with_url"] == len([c for c in result.courses if c.syllabus_url])
+        assert entry["fetched"] == entry["with_url"], "沒有連結的課不該算進進度"
+
+    def test_the_state_row_survives_a_lost_link(self, tmp_path, result):
+        """連結消失不代表要忘掉抓過的內容 —— 哪天連結回來時不必重抓。"""
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
+
+        dropped = next(c for c in result.courses if c.syllabus_url)
+        dropped.syllabus_url = None
+        crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=0.0)
+
+        assert dropped.id in read_syllabus_state(tmp_path)["115-1"]
+
     def test_a_second_run_fetches_nothing(self, tmp_path, result):
         crawl_syllabi(FakeFetcher(), result, tmp_path, limit=None, refresh_after=720.0)
         fetcher = FakeFetcher()
@@ -245,6 +284,32 @@ class TestCrawlSyllabi:
         paths = {e["path"] for e in read(tmp_path / "meta.json")["endpoints"]}
         assert "syllabus.json" in paths
         assert "{semester}/syllabus/{course_id}.json" in paths
+
+
+class TestDoneDetection:
+    """「這個學期補完了沒」看的就是進度那一對數字,分子的語意會直接影響它。"""
+
+    def test_a_stale_row_does_not_make_a_semester_look_finished(self, tmp_path):
+        """狀態檔裡兩筆已經沒有連結的課,剛好把數字墊到跟分母一樣高。
+
+        分子若是「狀態檔有幾筆」,這個學期會被當成補完 —— 而實際上還有兩門
+        有連結的課從來沒抓過,收合之後就再也不會排到它們了。
+        """
+        state = {
+            "113-1": {
+                cid: {"at": "2026-09-05T00:00:00Z", "hash": "x"}
+                for cid in ("gone-1", "gone-2", "kept")
+            }
+        }
+        # 現在有連結的是 kept 加上兩門還沒抓過的,共 3 門;
+        # gone-1 / gone-2 的連結已經沒了,所以真正抓到的只有 1 門
+        write_syllabus_index(
+            tmp_path,
+            state,
+            {"113-1": {"course_count": 10, "with_url": 3, "fetched": 1}},
+        )
+
+        assert "113-1" not in syllabus_done_semesters(tmp_path)
 
 
 class TestSyllabusCli:
