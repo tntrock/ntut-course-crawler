@@ -42,12 +42,25 @@ jobs:
       - name: Test
         run: pytest -q
 
-      # 比 crawl.yml 多撈一個 syllabus.json —— 那是「哪些課的大綱抓過了、
-      # 什麼時候抓的」的狀態。少了它每次都會從頭抓,分批就沒有意義。
+      # 這支 workflow 要還原的東西比其他三支多一種:除了根目錄的共用索引檔
+      # (跟 crawl / syllabus / backfill 一樣,capacity.json 本身也在這裡面 ——
+      # 沒有它 crawl_capacity() 會從空狀態重建,見 crawler.main 的說明),
+      # 還要把**每個學期**的 classrooms.json 都撈回來。
+      #
+      # 原因:crawler.main.classroom_targets() 用「該教室最後出現過的學期」
+      # 決定去哪個學期的頁面抓容量,這樣才能吃到全部 445 個教室代碼 ——
+      # 211 個只出現在舊學期(115-1 當期只有 234 個)。根目錄沒有任何檔案
+      # 帶著全部 445 個代碼(index.json 只涵蓋最新兩學期),所以只能靠展開
+      # sparse-checkout 的 pattern 把 51 個學期的 classrooms.json 都拉回來。
+      #
+      # **拿掉下面的 `*/classrooms.json` pattern 會讓涵蓋率悄悄縮回一個
+      # 學期(這次剛好爬到的那個),而且不會有任何測試失敗** —— 211 間
+      # 只在舊學期出現過的教室會永遠停在 capacity.json 裡的 null。
       - name: Restore shared index files
         run: |
           mkdir -p data
           if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classrooms.json'
             for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
               if [ -f ".gh-pages/$f" ]; then
                 cp ".gh-pages/$f" "data/$f"
@@ -56,10 +69,34 @@ jobs:
                 echo "gh-pages 上還沒有 $f"
               fi
             done
+            # 逐一複製每個學期的 classrooms.json(見上面說明,這是
+            # classroom_targets() 能不能看到全部 445 個代碼的關鍵)。
+            found=0
+            while IFS= read -r -d '' path; do
+              rel="${path#.gh-pages/}"
+              mkdir -p "data/$(dirname "$rel")"
+              cp "$path" "data/$rel"
+              found=$((found + 1))
+            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classrooms.json -print0)
+            echo "已還原 $found 個學期的 classrooms.json"
           else
             echo "gh-pages 還不存在(第一次跑),從零開始"
           fi
 
+      # 下面的指令**沒有帶 `--year`/`--sem`**,所以 main() 會先自動偵測、
+      # 完整抓一次首頁列出的學年期,再接著跑 `--with-capacity`。這是刻意
+      # 而且是必要的(不是順便):
+      #
+      # - 這是這批教室代碼最新的來源。上面 restore 回來的 classrooms.json
+      #   全部是 gh-pages 上**上次發布**的舊內容;當期若有新開的教室、或
+      #   課表本身有變動,只有真的抓一次課表才拿得到最新名單。
+      # - 更根本的是:如果拿掉這段課表抓取、只跑 `--with-capacity`,
+      #   `data/` 就只剩 restore 回來的舊學期,一旦 gh-pages 還沒發布過
+      #   (repo 剛啟用這支 workflow 的第一次執行)`data/` 會完全是空的,
+      #   `classroom_targets()` 找不到任何 `*/classrooms.json`,整個 job
+      #   會安靜地什麼都不做就結束 —— 這段課表抓取因此是 load-bearing 的,
+      #   不是可以省掉的額外開銷。
+      #
       # 失敗就等 30 分鐘整批重來,最多 3 次 —— 跟 crawl / syllabus 同一套理由:
       # crawler 內部的重試治得了線路抖動,治不了學校端幾十分鐘的中斷。
       # 重試很便宜:已經寫進 capacity.json 的教室不會再被選中(挑選規則會

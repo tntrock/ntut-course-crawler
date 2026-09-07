@@ -114,6 +114,33 @@ class TestCapacityWorkflow:
     def test_actually_asks_for_capacity(self) -> None:
         assert "--with-capacity" in CAPACITY.read_text(encoding="utf-8")
 
+    def restore_step(self) -> dict:
+        for step in self.workflow()["jobs"]["capacity"]["steps"]:
+            if "Restore" in (step.get("name") or ""):
+                return step
+        raise AssertionError("找不到 Restore shared index files 步驟")
+
+    def test_restores_every_semesters_classrooms_json(self) -> None:
+        """445 個教室代碼裡有 211 個只出現在舊學期的 classrooms.json ——
+        root 層沒有任何檔案帶著全部代碼,唯一辦法是展開 sparse-checkout
+        去撈每個學期自己的 classrooms.json。少了這個 pattern,
+        classroom_targets() 只看得到這次剛好爬到的那個學期。
+        """
+        run = self.restore_step().get("run", "")
+        assert "classrooms.json" in run
+        assert "sparse-checkout set" in run
+
+    def test_crawl_step_does_not_pin_a_single_semester(self) -> None:
+        """`--with-capacity` 前面的抓取要用自動偵測(不給 --year/--sem),
+        這一步本身就是 classroom_targets() 的資料來源之一,拿掉的話
+        `data/` 會是空的,整個 job 安靜地什麼都不做。"""
+        for step in self.workflow()["jobs"]["capacity"]["steps"]:
+            if (step.get("name") or "") == "Crawl capacity":
+                run = step.get("run", "")
+                assert "--year" not in run and "--sem " not in run
+                return
+        raise AssertionError("找不到 Crawl capacity 步驟")
+
 
 class TestCapacityRestoredEverywhere:
     """漏還原 capacity.json 的後果不是「這次抓不到」,是安靜地用空值蓋掉
