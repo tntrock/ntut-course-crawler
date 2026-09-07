@@ -60,6 +60,7 @@ https://tntrock.github.io/ntut-course-crawler/
 | `changes.json` | 最近的課程與教師異動事件（見下） | 隨異動量變動 |
 | `enrollment.json` | 修課 / 撤選人數逐日快照的索引（見下） | 隨天數變動 |
 | `{semester}/enrollment/{date}.json` | 某一天的逐課修課 / 撤選人數 | 約 120 KB / 天 |
+| `capacity.json` | 教室容量（座位數） | 約 25 KB |
 | `syllabus.json` | 教學大綱的抓取進度與逐課狀態（見下） | 隨課數變動 |
 | `{semester}/syllabus/{course_id}.json` | 單一課程的教學大綱與進度 | 約 3–8 KB / 門 |
 | `{semester}/index.json` | **單一學期**的課程輕量索引 | 711 KB |
@@ -779,6 +780,20 @@ v3 改成比對**內容雜湊**：
 ```
 
 學程只有中文名稱、沒有代碼，所以不另外開明細檔。
+
+#### 教室容量
+
+`capacity.json` 是教室代碼 → 容量的對照表，各學期的 `classrooms.json` 每筆也
+直接帶 `capacity` 欄位，不必再查一次。
+
+> **容量與學期無關。** 實測 `Croom.jsp` 的 `year` / `sem` 參數只影響使用率與
+> 週課表，容量欄位不受影響 —— 打一個不存在的學年度（`year=199`）仍然回傳
+> 正確容量。所以學校**不保留歷史容量**：教室改建後，所有學期都會顯示新值。
+>
+> 因此各學期 `classrooms.json` 的 `capacity` 反映的是**最近一次觀測值**，
+> 不是那個學期當時的容量。抓不到時是 `null`，不是 `0`。
+>
+> 每月重抓一輪，`capacity.json` 的 `checked_at` 是該筆最後一次確認的時間。
 
 ### `115-1/schedule.json`
 

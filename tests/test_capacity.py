@@ -230,3 +230,11 @@ class TestClassroomsGetCapacity:
         entries = read(tmp_path / "115-1" / "classrooms.json")["classrooms"]
         # 壞掉的項目應該填 None,不是拋例外
         assert all(e["capacity"] is None for e in entries)
+
+
+class TestEndpointsListed:
+    def test_capacity_is_advertised_in_meta(self, tmp_path):
+        """meta.json 的 endpoints 是使用者發現新資料的唯一途徑。"""
+        write_outputs(crawl(FakeFetcher(), 115, 1, only_departments=["59"]), tmp_path)
+        paths = [e["path"] for e in read(tmp_path / "meta.json")["endpoints"]]
+        assert "capacity.json" in paths
