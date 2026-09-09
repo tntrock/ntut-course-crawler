@@ -48,7 +48,7 @@ from .output import (
     write_syllabus,
     write_syllabus_index,
 )
-from .parse_course import parse_courses
+from .parse_course import CourseTableMissing, parse_courses
 from .parse_croom import parse_classroom
 from .parse_dept import parse_class_groups, parse_colleges
 from .parse_semester import parse_semesters
@@ -100,6 +100,28 @@ DEFAULT_CAPACITY_REFRESH_AFTER = 480.0
 DEFAULT_MAX_CAPACITY = 0
 
 
+#: 班級課表頁回一頁「沒有課程表格」時,同一輪裡最多抓幾次。
+#:
+#: 學校偶發會回這種頁面(2026-09-08 班級 3777、2026-09-09 班級 3041 各一次),
+#: 而它 HTTP 上是成功的,重試機制完全不會發動。次數不必多:真的是暫時性的
+#: 抖動,隔一個 delay 再問一次就好;真的壞掉,問十次也一樣。
+CLASS_PAGE_ATTEMPTS = 3
+
+
+class IncompleteCrawl(RuntimeError):
+    """這個學期抓到的東西不完整,不可以拿去覆蓋線上那份。
+
+    跟 `SiteUnavailable` 同源(見 `crawl()` 裡「不輸出半套資料」的註解),
+    只是條件下沉到班級層級:某個班級的課表頁重抓完還是壞的,我們就不知道
+    它底下有哪些課 —— 那不等於「它沒有課」。把這種結果寫出去,那些課會從
+    索引消失,並且被異動偵測記成一批停開。
+
+    往上拋之後由 `main()` 的學期層級容錯接住:記進 `errors.json`、這個學期
+    不輸出(發布用 `keep_files`,線上那份原封不動),整體回非 0 讓 workflow
+    的重試迴圈發動。快取是同一個 job 共用的,重試只會重抓壞掉的那一頁。
+    """
+
+
 # --------------------------------------------------------------------------
 # 抓取
 # --------------------------------------------------------------------------
@@ -113,6 +135,9 @@ class CrawlResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
     ok_departments: int = 0
     failed_departments: int = 0
+    #: 課表頁重抓完還是壞掉的班級代碼。非空 = 這一輪的課程清單有缺口,
+    #: `crawl()` 會在跑完之後拋 `IncompleteCrawl`,不讓它被發布出去。
+    broken_class_groups: list[str] = field(default_factory=list)
     merged_courses: int = 0  # 同課號在多個班級頁重複出現、被合併掉的次數
     partial: bool = False  # --dept 只抓了部分單位,資料集不完整
     # 這次是 --years 的回補。回補的對象是已經結束的學期,不該留下「今天的」
@@ -332,6 +357,16 @@ def crawl(
             f"(已完成 {result.ok_departments}/{len(departments)} 個單位),不輸出半套資料"
         )
 
+    if result.broken_class_groups:
+        # 課表頁壞掉的班級。刻意等整輪跑完才拋:其他班級照抓,快取才是熱的,
+        # workflow 的重試迴圈就只會重抓壞掉的那一頁(見 IncompleteCrawl)。
+        raise IncompleteCrawl(
+            f"{result.semester} 有 {len(result.broken_class_groups)} 個班級的課表頁"
+            f"重抓 {CLASS_PAGE_ATTEMPTS} 次都沒有課程表格"
+            f"({', '.join(result.broken_class_groups)}),"
+            "不知道它們底下有哪些課,不輸出半套資料"
+        )
+
     result.courses = sorted(merged.values(), key=lambda c: c.id)
     result.elapsed = time.monotonic() - started
     return result
@@ -384,6 +419,37 @@ def _restore_missing_groups(
     return groups + missing
 
 
+def _fetch_class_courses(
+    fetcher: Fetcher, group: ClassGroup, params: dict[str, Any]
+) -> list[Course]:
+    """抓一個班級的課表頁並解析。頁面壞掉時重抓,重抓完還是壞就往上拋。
+
+    「壞掉」指的是整頁找不到課程表格(`CourseTableMissing`)—— 那不是
+    「這個班級沒有課」,詳見該例外的說明。HTTP 上它是一次成功的請求,
+    tenacity 的重試、斷路器都不會發動,所以要在這一層自己重來。
+
+    每次失敗都要 `invalidate()`:壞掉那一份已經被寫進 `.cache/`,不丟掉的話
+    下一次 `fetch()` 直接命中快取,重抓等於沒抓 —— 連 workflow 的重試迴圈
+    (同一個 job、同一份快取)也會一路失敗到放棄。
+    """
+    request = {"format": -4, "code": group.id, **params}
+
+    for attempt in range(1, CLASS_PAGE_ATTEMPTS + 1):
+        page = fetcher.fetch("Subj.jsp", params=request)
+        try:
+            return parse_courses(page)
+        except CourseTableMissing:
+            fetcher.invalidate("Subj.jsp", params=request)
+            if attempt == CLASS_PAGE_ATTEMPTS:
+                raise
+            log.warning(
+                "班級 %s (%s) 的課表頁沒有課程表格,重抓(第 %d/%d 次)",
+                group.name, group.id, attempt, CLASS_PAGE_ATTEMPTS,
+            )
+
+    raise AssertionError("不會走到這裡")  # pragma: no cover
+
+
 def _crawl_department(
     fetcher: Fetcher,
     dept: Department,
@@ -398,9 +464,28 @@ def _crawl_department(
 
     for group in groups:
         try:
-            page = fetcher.fetch(
-                "Subj.jsp", params={"format": -4, "code": group.id, **params}
+            courses = _fetch_class_courses(fetcher, group, params)
+        except CourseTableMissing as exc:
+            # 重抓完頁面還是壞的。這一條**不能**跟下面的 continue 混在一起 ——
+            # 「抓不到這個班級」跟「這個班級沒有課」在輸出上長得一模一樣,
+            # 而後者會變成一批假停開。記下來,讓 crawl() 整個學期不輸出。
+            log.error(
+                "班級 %s (%s) 的課表頁重抓 %d 次都沒有課程表格:%s",
+                group.name, group.id, CLASS_PAGE_ATTEMPTS, exc,
             )
+            result.broken_class_groups.append(group.id)
+            result.errors.append(
+                {
+                    "stage": "class_group_broken",
+                    "department_id": dept.id,
+                    "department_name": dept.name,
+                    "class_group_id": group.id,
+                    "class_group_name": group.name,
+                    "url": group.url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
         except Exception as exc:
             # 班級層級失敗不影響同單位的其他班級
             log.error("班級 %s (%s) 抓取失敗:%s", group.name, group.id, exc)
@@ -417,7 +502,13 @@ def _crawl_department(
             )
             continue
 
-        for course in parse_courses(page):
+        if not courses:
+            # 表格在、但一門課都沒有。這是合法的 0 門(班級被撤空),不當成
+            # 失敗 —— 但 115-1 的 293 個班級正常情況一個 0 門的都沒有,
+            # 所以它值得在 log 上留一行。
+            log.warning("班級 %s (%s) 的課表頁一門課都沒有", group.name, group.id)
+
+        for course in courses:
             course.class_ids = [group.id]
             course.department_ids = [dept.id]
             if not course.classes:

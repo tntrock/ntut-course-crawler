@@ -54,7 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from crawler.http import Fetcher  # noqa: E402
-from crawler.parse_course import parse_courses  # noqa: E402
+from crawler.parse_course import CourseTableMissing, parse_courses  # noqa: E402
 
 BASE = "https://tntrock.github.io/ntut-course-crawler"
 
@@ -77,13 +77,23 @@ def targets(events: list[dict], at: str | None) -> list[dict]:
 
 
 def live_course_ids(fetcher: Fetcher, semester: str, class_id: str) -> set[str]:
-    """那個班級現在的課表頁上有哪些課號。"""
+    """那個班級現在的課表頁上有哪些課號。
+
+    這一頁**正好就是會壞的那一頁**。壞掉時回空集合會把整批停開判定成「真的
+    停開」而保留下來 —— 判反了還不如不判,所以直接往上拋,讓人重跑。
+    """
     year, _, sem = semester.partition("-")
     html = fetcher.fetch(
         "Subj.jsp",
         params={"format": -4, "year": year, "sem": sem, "code": class_id},
     )
-    return {c.id for c in parse_courses(html)}
+    try:
+        return {c.id for c in parse_courses(html)}
+    except CourseTableMissing as exc:
+        raise SystemExit(
+            f"班級 {class_id} 的課表頁這次沒有課程表格({exc})—— "
+            "那正是這個 bug 的來源頁面,判不了,等一下再跑一次"
+        ) from exc
 
 
 def main() -> int:

@@ -36,10 +36,15 @@ class FakeFetcher:
         fail_semesters: set[tuple[int, int]] | None = None,
         unavailable_after: int | None = None,
         drop_class_groups: set[str] | None = None,
+        break_class_pages: dict[str, int] | None = None,
     ) -> None:
         # 單位頁(format=-3)要少列的班級代碼。學校實測會偶發少列幾個
         # 連結,而少列不會產生任何錯誤 —— 那正是假停開的來源。
         self.drop_class_groups = drop_class_groups or set()
+        # 班級代碼 → 還要回幾次「沒有課程表格」的壞頁面。學校偶發會回這種
+        # 頁面(2026-09-09 班級 3041 實測),見 tests/test_broken_class_page.py。
+        self.break_class_pages = dict(break_class_pages or {})
+        self.invalidated: list[str | None] = []
         self.fail_on = fail_on or set()
         # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
         self.fail_semesters = fail_semesters or set()
@@ -90,8 +95,14 @@ class FakeFetcher:
         if fmt == -3:
             return self._dept_page()
         if fmt == -4:
+            if self.break_class_pages.get(code):
+                self.break_class_pages[code] -= 1
+                return "<html><body>本班無課程</body></html>"
             return load_fixture("course_list_real.html")
         raise AssertionError(f"沒預期到的 format={fmt}")
+
+    def invalidate(self, url: str, *, params: dict | None = None) -> None:
+        self.invalidated.append((params or {}).get("code"))
 
     def _dept_page(self) -> str:
         """單位頁,可選擇性地抽掉幾個班級連結。
@@ -133,6 +144,7 @@ def fake_fetcher_factory(monkeypatch):
             self.fail_semesters: set[tuple[int, int]] = set()
             self.unavailable_after: int | None = None
             self.drop_class_groups: set[str] = set()
+            self.break_class_pages: dict[str, int] = {}
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
@@ -141,6 +153,7 @@ def fake_fetcher_factory(monkeypatch):
                 fail_semesters=self.fail_semesters,
                 unavailable_after=self.unavailable_after,
                 drop_class_groups=self.drop_class_groups,
+                break_class_pages=self.break_class_pages,
             )
             self.created.append(fetcher)
             return fetcher

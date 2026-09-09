@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from crawler.parse_course import COLUMN_COUNT, parse_courses
+from crawler.parse_course import COLUMN_COUNT, CourseTableMissing, parse_courses
 
 
 @pytest.fixture
@@ -204,8 +204,14 @@ class TestDegradedInput:
             c = parse_courses(html)[0]
         assert c.credits is None and c.enrolled is None
 
-    def test_page_without_course_table(self):
-        assert parse_courses("<html><body>本班無課程</body></html>") == []
+    def test_page_without_course_table_is_an_error_not_an_empty_class(self):
+        """整頁沒有課程表格 = 這一頁不是課表頁,不是「這個班級沒有課」。
+
+        兩者混在一起的代價見 tests/test_broken_class_page.py:那個班級底下的
+        課會安靜消失,再被異動偵測記成一批停開。
+        """
+        with pytest.raises(CourseTableMissing):
+            parse_courses("<html><body>本班無課程</body></html>")
 
     def test_period_legend_table_is_not_mistaken_for_courses(self, fixture):
         """頁尾還有一張節次對照表,不能被當成課程表格。"""

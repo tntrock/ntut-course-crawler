@@ -41,6 +41,23 @@ COL_PROGRAMS = 22
 _COURSE_ID_RE = re.compile(r"^\d+$")
 
 
+class CourseTableMissing(ValueError):
+    """課程列表頁上整頁找不到課程表格。
+
+    **這不是「這個班級沒有課」,是這一頁根本不是課表頁。** 23 欄的表頭
+    (`課號` `課程名稱` `階段` …)是靜態版面的一部分,連一門課都沒有的班級
+    照樣會渲染出來 —— 所以「找不到 `課號` 表頭」只可能是學校端當下回了
+    別的東西(錯誤頁、被截斷的回應)。
+
+    這裡刻意拋例外而不是照 reference.md「降級處理」回空清單:那條規則講的是
+    **欄位**讀不到就填 `None`,不是整頁的內容都沒讀到還假裝讀到了。回空清單
+    的後果實測過兩次 —— 那個班級底下的課會安靜地從資料集消失,再被異動偵測
+    記成一批停開(2026-09-08 班級 3777 十三門、2026-09-09 班級 3041 六門)。
+    降級的位置在呼叫端:`_crawl_department()` 會重抓,重抓完還是壞就讓整個
+    學期失敗,而不是發布一份少了一個班級的資料。
+    """
+
+
 def parse_courses(html: str) -> list[Course]:
     """解析課程列表頁,回傳該班級的所有課程。
 
@@ -48,12 +65,14 @@ def parse_courses(html: str) -> list[Course]:
     - 開頭的「班週會及導師時間」(課號欄空白,不是真的課)
     - 結尾的「小計」列(課號欄是文字)
     判斷一律看**課號欄是否為純數字**,不用列的位置,學校加減列也不會壞。
+
+    頁面上找不到課程表格時拋 `CourseTableMissing`(見它的說明)。表格在、
+    但一門課都沒有,回空清單 —— 那是合法的 0 門。
     """
     soup = soup_of(html)
     table = _find_course_table(soup)
     if table is None:
-        log.warning("課程頁找不到課程表格,回傳空清單")
-        return []
+        raise CourseTableMissing("課程頁找不到含「課號」表頭的表格")
 
     class_name = _class_name(table)
     courses: list[Course] = []
