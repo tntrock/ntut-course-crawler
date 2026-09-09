@@ -145,6 +145,42 @@ def test_no_cache_always_refetches(tmp_path, no_sleep):
     assert len(session.calls) == 2
 
 
+def test_invalidate_drops_the_cached_copy(tmp_path, no_sleep):
+    """HTTP 成功但內容壞掉的頁面照樣進快取,呼叫端要有辦法把它丟掉。
+
+    沒有這個,workflow 的重試迴圈(同一個 job、同一份快取)會一路讀到同一頁
+    壞掉的 HTML,一個請求都不會真的發出去 —— 見 crawler.main.IncompleteCrawl。
+    """
+    session = FakeSession(
+        FakeResponse(b"<html>bad</html>"), FakeResponse(b"<html>good</html>")
+    )
+    f = Fetcher(cache_dir=tmp_path, session=session)
+    assert f.fetch("Subj.jsp", params={"code": "3041"}) == "<html>bad</html>"
+
+    f.invalidate("Subj.jsp", params={"code": "3041"})
+
+    assert f.fetch("Subj.jsp", params={"code": "3041"}) == "<html>good</html>"
+    assert len(session.calls) == 2
+
+
+def test_invalidate_on_something_never_cached_is_harmless(tmp_path, no_sleep):
+    Fetcher(cache_dir=tmp_path, session=FakeSession()).invalidate("Subj.jsp")
+
+
+def test_invalidate_only_drops_that_one_url(tmp_path, no_sleep):
+    session = FakeSession(
+        FakeResponse(b"<html>a</html>"), FakeResponse(b"<html>b</html>")
+    )
+    f = Fetcher(cache_dir=tmp_path, session=session)
+    f.fetch("Subj.jsp", params={"code": "59"})
+    f.fetch("Subj.jsp", params={"code": "31"})
+
+    f.invalidate("Subj.jsp", params={"code": "59"})
+
+    assert f.fetch("Subj.jsp", params={"code": "31"}) == "<html>b</html>"
+    assert len(session.calls) == 2
+
+
 def test_different_params_are_different_cache_entries(tmp_path, no_sleep):
     session = FakeSession(
         FakeResponse(b"<html>dept</html>"), FakeResponse(b"<html>class</html>")

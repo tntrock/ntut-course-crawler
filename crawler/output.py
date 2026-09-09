@@ -591,6 +591,19 @@ def read_capacity(out_dir: Path) -> dict[str, dict[str, Any]]:
     return classrooms if isinstance(classrooms, dict) else {}
 
 
+def read_index_course_ids(out_dir: Path, year: int, sem: int) -> set[str]:
+    """上一輪頂層索引裡屬於這個學年期的課號。
+
+    給 `crawl()` 的停開查證用(`_verify_removals()`)—— 這是異動偵測比對停開
+    的同一份基準,所以「這一輪少了哪些課」在這裡算出來的結果,跟事件流那邊
+    會記成停開的那批是同一個集合。
+
+    沒有這個學年期的資料時回空集合:那是第一次抓(或它已經被擠出索引的涵蓋
+    範圍),異動偵測那邊也只會記一筆 baseline,沒有停開要查證。
+    """
+    return set(_previous_index_entries(Path(out_dir), year, sem) or {})
+
+
 def read_class_groups(out_dir: Path, semester: str) -> dict[str, list[ClassGroup]]:
     """從上一輪的 `<學期>/classes.json` 讀回「這個單位有哪些班級」。
 

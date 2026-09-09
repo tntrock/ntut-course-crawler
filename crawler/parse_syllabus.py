@@ -18,9 +18,16 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from .config import TAIPEI
-from .parse_util import clean
+from .parse_util import clean, soup_of
 
 log = logging.getLogger("crawler.parse_syllabus")
+
+#: 課程基本資料表格裡課號那一欄的位置(學年期 課號 課程名稱 …)。
+_BASIC_COL_ID = 1
+
+#: 課不在開課資料裡時,頁面頂端的紅字。實測樣本:
+#: `錯誤訊息 : 查無課號 (364585) 的開課資料`
+_MISSING_COURSE_RE = re.compile(r"查無課號\s*\((\d+)\)")
 
 #: 標籤 → 輸出欄位名。key 是拿掉空白後的標籤文字。
 _FIELDS = {
@@ -54,6 +61,59 @@ _FLEX_FIELDS = {
 
 #: 清單項目開頭的項目符號。
 _BULLET_RE = re.compile(r"^[●○•●○]\s*")
+
+
+def course_exists(html: str, course_id: str) -> bool | None:
+    """學校的開課資料裡還有這門課嗎?`True` 有、`False` 沒有、`None` 判不出來。
+
+    給停開判定用。異動偵測原本是**用缺席推論**停開的 —— 上一輪有、這一輪
+    沒有就記一筆,而「課停開了」跟「我們這一輪讀錯了」在輸出上一模一樣。
+    這一頁提供正面證據:課不在了,學校會明講「查無課號 (N) 的開課資料」。
+
+    判準是**課程基本資料那一列**,不是有沒有大綱內容(2026-09-09 實抓確認):
+
+    - `code` 參數不影響這一列。`snum=364585` 配對的 code 與別門課的 code
+      回傳的頁面逐字相同 —— 所以查存在只需要課號,不必存 `syllabus_url`。
+    - 但 `code` 影響**大綱內容**:不帶 code 時課程基本資料照樣完整渲染,
+      下面的大綱區塊卻是「尚未登錄」,跟停開的頁面長得一樣。拿大綱內容
+      當判準會把還在的課判成停開。
+
+    對不上課號一律回 `None`,不回 `False` —— 拿到別門課的頁面、或版面改了,
+    都是「判不出來」。**判不出來絕不可以當成停開**:這個函式存在的理由就是
+    要有證據才記停開,沒證據時退回猜測等於什麼都沒做。
+    """
+    soup = soup_of(html)
+    table = _find_basic_table(soup)
+    if table is None:
+        log.warning("大綱頁找不到課程基本資料表格,無法判定課號 %s", course_id)
+        return None
+
+    for row in table.find_all("tr"):
+        cells = row.find_all("td", recursive=False)
+        if len(cells) >= _BASIC_COL_ID + 1:
+            if clean(cells[_BASIC_COL_ID].get_text()) == course_id:
+                return True
+
+    # 沒有那一列 → 看有沒有明確的錯誤訊息。「查無課號 (N)」的 N 要對得上,
+    # 不然拿到的是別門課的頁面,那是判不出來,不是停開。
+    missing = _MISSING_COURSE_RE.search(soup.get_text(" "))
+    if missing:
+        return False if missing.group(1) == course_id else None
+
+    log.warning("大綱頁既沒有課號 %s 那一列,也沒有錯誤訊息,判不出來", course_id)
+    return None
+
+
+def _find_basic_table(soup):
+    """課程基本資料表格:第一個表頭同時有「學年期」與「課號」的表格。
+
+    不能拿第一個 `<table>` —— 下面還有大綱內容那張,以及彈性學習的巢狀表格。
+    """
+    for table in soup.find_all("table"):
+        headers = {clean(th.get_text()) for th in table.find_all("th")}
+        if "學年期" in headers and "課號" in headers:
+            return table
+    return None
 
 
 def parse_syllabus(html: str) -> dict[str, Any]:

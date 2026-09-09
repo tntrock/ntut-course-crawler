@@ -36,10 +36,25 @@ class FakeFetcher:
         fail_semesters: set[tuple[int, int]] | None = None,
         unavailable_after: int | None = None,
         drop_class_groups: set[str] | None = None,
+        break_class_pages: dict[str, int] | None = None,
+        hide_courses: set[str] | None = None,
+        gone_courses: set[str] | None = None,
+        undecidable_courses: set[str] | None = None,
     ) -> None:
+        # 課表頁要抽掉的課號(模擬「課從資料集消失」),以及學校在大綱頁
+        # 怎麼回答:gone = 查無課號(真停開)、undecidable = 版面認不得。
+        # 兩者都沒列到的課,大綱頁會說它還在。
+        self.hide_courses = hide_courses or set()
+        self.gone_courses = gone_courses or set()
+        self.undecidable_courses = undecidable_courses or set()
+        self.checked_courses: list[str] = []
         # 單位頁(format=-3)要少列的班級代碼。學校實測會偶發少列幾個
         # 連結,而少列不會產生任何錯誤 —— 那正是假停開的來源。
         self.drop_class_groups = drop_class_groups or set()
+        # 班級代碼 → 還要回幾次「沒有課程表格」的壞頁面。學校偶發會回這種
+        # 頁面(2026-09-09 班級 3041 實測),見 tests/test_broken_class_page.py。
+        self.break_class_pages = dict(break_class_pages or {})
+        self.invalidated: list[str | None] = []
         self.fail_on = fail_on or set()
         # 整個學期抓不到(學校維護、連線逾時):總覽頁就先炸掉
         self.fail_semesters = fail_semesters or set()
@@ -78,6 +93,18 @@ class FakeFetcher:
             raise TimeoutError(f"模擬 {key[0]}-{key[1]} 連線逾時")
 
         if "ShowSyllabus.jsp" in url:
+            snum = params.get("snum")
+            if snum is not None:
+                # 停開查證(_verify_removals)。用真實樣本、把課號換掉 ——
+                # 版面要是真的,不然守的是自己編的頁面。
+                self.checked_courses.append(snum)
+                if snum in self.undecidable_courses:
+                    return "<html><body>維護中</body></html>"
+                if snum in self.gone_courses:
+                    return load_fixture("syllabus_course_gone.html").replace(
+                        "364585", snum
+                    )
+                return load_fixture("syllabus_basic_only.html").replace("362160", snum)
             if url in self.no_syllabus:
                 return "<html><body>查無資料</body></html>"
             return load_fixture("syllabus_page_real.html")
@@ -90,8 +117,34 @@ class FakeFetcher:
         if fmt == -3:
             return self._dept_page()
         if fmt == -4:
-            return load_fixture("course_list_real.html")
+            if self.break_class_pages.get(code):
+                self.break_class_pages[code] -= 1
+                return "<html><body>本班無課程</body></html>"
+            return self._course_page()
         raise AssertionError(f"沒預期到的 format={fmt}")
+
+    def _course_page(self) -> str:
+        """課表頁,可選擇性地抽掉幾門課。
+
+        模擬的是「這一輪的結果少了這門課」—— 不管少的原因是什麼,對停開
+        判定來說都長得一樣。
+        """
+        html = load_fixture("course_list_real.html")
+        for code in self.hide_courses:
+            start = html.find(f"<td>{code}")
+            if start == -1:
+                continue
+            row = html.rfind("<tr", 0, start)
+            end = html.find("<tr", start)
+            if end == -1:
+                end = html.find("</table>", start)
+            if row == -1 or end == -1:
+                continue
+            html = html[:row] + html[end:]
+        return html
+
+    def invalidate(self, url: str, *, params: dict | None = None) -> None:
+        self.invalidated.append((params or {}).get("code"))
 
     def _dept_page(self) -> str:
         """單位頁,可選擇性地抽掉幾個班級連結。
@@ -133,6 +186,10 @@ def fake_fetcher_factory(monkeypatch):
             self.fail_semesters: set[tuple[int, int]] = set()
             self.unavailable_after: int | None = None
             self.drop_class_groups: set[str] = set()
+            self.break_class_pages: dict[str, int] = {}
+            self.hide_courses: set[str] = set()
+            self.gone_courses: set[str] = set()
+            self.undecidable_courses: set[str] = set()
             self.created: list[FakeFetcher] = []
 
         def __call__(self, **kwargs):
@@ -141,6 +198,10 @@ def fake_fetcher_factory(monkeypatch):
                 fail_semesters=self.fail_semesters,
                 unavailable_after=self.unavailable_after,
                 drop_class_groups=self.drop_class_groups,
+                break_class_pages=self.break_class_pages,
+                hide_courses=self.hide_courses,
+                gone_courses=self.gone_courses,
+                undecidable_courses=self.undecidable_courses,
             )
             self.created.append(fetcher)
             return fetcher

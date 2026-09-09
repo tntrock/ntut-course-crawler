@@ -18,18 +18,34 @@
 
 判定規則
 --------
-**一門課的教學大綱在它被記成加開之前就抓過了 → 它先前就存在。**
+兩條,符合任一條就是假加開。
+
+**規則一:一門課的教學大綱在它被記成加開之前就抓過了 → 它先前就存在。**
 
 大綱是照著當時的課表逐課抓的,所以 `syllabus.json` 裡有一筆抓取時間,就證明
 那個時間點這門課在課表上。真正新開的課不可能在出現之前就被抓過大綱。
 
-這條規則不會誤刪真正的加開,代價是漏掉「沒有大綱連結的課被漏抓又回來」——
-那種只能靠人工判斷,腳本不猜。
+⚠️ **`syllabus.json` 只留最後一次的抓取時間。** 課回來之後又被抓過一次大綱,
+那個時間戳就會蓋掉舊的、變成晚於加開事件,這條規則就再也證不出來了 ——
+2026-09-08 班級 3777 那 13 筆實際上就是這樣溜掉的(隔天 05:43 又抓了一次)。
+所以**清理要趁早**,或者改用規則二。
+
+**規則二:它跟一筆「已經被判定為假、而且已經刪掉」的停開對得起來。**
+
+`--paired-with` 吃一份**清理前**的 `changes.json`(從 gh-pages 的歷史撈,
+例如 `gh api "repos/OWNER/REPO/contents/changes.json?ref=<清理前的 commit>"`)。
+舊檔裡有、新檔裡沒有的停開 = 上一次已經查證過學校、確認是假的那一批;
+同課號的加開就是它回來時留下的另一半,一樣是假的。
+
+兩條規則都不會誤刪真正的加開。共同的代價是漏掉「沒有大綱連結、也沒有配對
+停開紀錄」的課 —— 那種只能靠人工判斷,腳本不猜。
 
 用法
 ----
     python scripts/drop_phantom_additions.py --dry-run       # 先看會刪掉什麼
     python scripts/drop_phantom_additions.py --out changes.json
+    python scripts/drop_phantom_additions.py \
+        --paired-with before.json --out changes.json
 
 預設從線上端點讀,也可以用 --changes / --syllabus 指定本機檔案。產出的檔案
 覆蓋 gh-pages 根目錄的 `changes.json` 即可(單檔提交,不必 clone 整個分支)。
@@ -74,18 +90,53 @@ def fetched_at(syllabus: dict) -> dict[tuple[str, str], str]:
     return out
 
 
-def is_phantom(event: dict, stamps: dict[tuple[str, str], str]) -> bool:
+def dropped_removals(before: dict | None, current: dict) -> set[tuple[str, str]]:
+    """上一次清理已經刪掉的停開,(學期, 課號)。
+
+    在**清理前**的事件流裡是 `course_removed`、現在不在了 —— 那就是上一次
+    拿去跟學校對照、確認課還在課表上的那一批(`drop_phantom_removals.py`)。
+    它們回來時留下的加開是同一個 bug 的另一半。
+    """
+    if not before:
+        return set()
+
+    def removals(payload: dict) -> set[tuple[str, str]]:
+        return {
+            (e.get("semester"), e.get("id"))
+            for e in payload.get("events") or []
+            if e.get("type") == "course_removed"
+        }
+
+    return removals(before) - removals(current)
+
+
+def reason(
+    event: dict,
+    stamps: dict[tuple[str, str], str],
+    paired: set[tuple[str, str]],
+) -> str | None:
+    """這筆事件是假加開的理由,不是假加開就回 None。"""
     if event.get("type") != "course_added":
-        return False
+        return None
     key = (event.get("semester"), event.get("id"))
+
     at = stamps.get(key)
-    return bool(at and at < event.get("at", ""))
+    if at and at < event.get("at", ""):
+        return f"大綱早在 {at} 就抓過了"
+    if key in paired:
+        return "跟上次清掉的假停開是同一門課"
+    return None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changes", help="本機的 changes.json(預設讀線上)")
     parser.add_argument("--syllabus", help="本機的 syllabus.json(預設讀線上)")
+    parser.add_argument(
+        "--paired-with",
+        metavar="FILE",
+        help="清理前的 changes.json(啟用規則二,見 docstring)",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="只列出會刪掉什麼,不輸出檔案"
     )
@@ -97,26 +148,31 @@ def main() -> int:
 
     changes = load(args.changes, "changes.json")
     stamps = fetched_at(load(args.syllabus, "syllabus.json"))
+    before = json.loads(Path(args.paired_with).read_text(encoding="utf-8")) \
+        if args.paired_with else None
+    paired = dropped_removals(before, changes)
+    if args.paired_with:
+        print(f"上次清掉的假停開:{len(paired)} 筆", file=sys.stderr)
 
     events = changes.get("events") or []
-    phantom = [e for e in events if is_phantom(e, stamps)]
+    verdicts = [(e, reason(e, stamps, paired)) for e in events]
+    phantom = [e for e, why in verdicts if why]
 
     if args.dry_run:
         print(f"事件總數 {len(events)},判定為假加開 {len(phantom)} 筆:", file=sys.stderr)
-        for e in phantom:
-            key = (e.get("semester"), e.get("id"))
-            print(
-                f"  {e['at']}  {e['id']}  {e.get('name')}"
-                f"   ← 大綱早在 {stamps[key]} 就抓過了",
-                file=sys.stderr,
-            )
+        for e, why in verdicts:
+            if why:
+                print(
+                    f"  {e['at']}  {e['id']}  {e.get('name')}   ← {why}",
+                    file=sys.stderr,
+                )
         return 0
 
     if not phantom:
         print("沒有要移除的事件,不輸出", file=sys.stderr)
         return 1
 
-    changes["events"] = [e for e in events if not is_phantom(e, stamps)]
+    changes["events"] = [e for e, why in verdicts if not why]
     text = json.dumps(changes, ensure_ascii=False, separators=(",", ":")) + "\n"
     # 明確 UTF-8 + LF。這個 repo 的檔案是 LF,而 Windows 的預設編碼是 cp950。
     Path(args.out).write_bytes(text.encode("utf-8").replace(b"\r\n", b"\n"))

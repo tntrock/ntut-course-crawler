@@ -203,6 +203,13 @@ class Fetcher:
         except OSError as exc:  # pragma: no cover - 磁碟異常
             log.warning("寫入快取失敗(%s):%s", exc, url)
 
+    def _cache_drop(self, url: str) -> None:
+        for path in self._cache_paths(url):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:  # pragma: no cover - 磁碟異常
+                log.warning("清除快取失敗(%s):%s", exc, url)
+
     # -- 實際請求 -----------------------------------------------------------
     @retry(
         retry=retry_if_exception_type((ServerError, *TRANSIENT)),
@@ -225,6 +232,16 @@ class Fetcher:
         """把相對路徑 + query 組成正規化的絕對 URL(也是快取鍵)。"""
         absolute = urljoin(BASE_URL, url)
         return requests.Request("GET", absolute, params=params).prepare().url
+
+    def invalidate(self, url: str, *, params: dict | None = None) -> None:
+        """把這個網址的快取丟掉,下次 `fetch()` 一定重新去問。
+
+        給「HTTP 成功、但內容明顯不是我們要的那一頁」用 —— 那種回應照樣是
+        200,會被寫進 `.cache/`。workflow 的重試迴圈跟第一次跑在**同一個
+        job**,快取是共用的:不丟掉這一份,五次重試會全部讀到同一頁壞掉的
+        HTML,一個請求都不會真的發出去,也就永遠不會好。
+        """
+        self._cache_drop(self.build_url(url, params))
 
     def fetch(self, url: str, *, params: dict | None = None) -> str:
         """回傳已正確解碼的 HTML 字串。
