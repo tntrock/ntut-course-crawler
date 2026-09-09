@@ -36,6 +36,7 @@ from .output import (
     is_frozen_semester,
     read_capacity,
     read_class_groups,
+    read_index_course_ids,
     read_semester_times,
     syllabus_done_semesters,
     read_syllabus_frozen,
@@ -52,7 +53,7 @@ from .parse_course import CourseTableMissing, parse_courses
 from .parse_croom import parse_classroom
 from .parse_dept import parse_class_groups, parse_colleges
 from .parse_semester import parse_semesters
-from .parse_syllabus import parse_syllabus
+from .parse_syllabus import course_exists, parse_syllabus
 
 log = logging.getLogger("crawler")
 
@@ -106,6 +107,15 @@ DEFAULT_MAX_CAPACITY = 0
 #: 而它 HTTP 上是成功的,重試機制完全不會發動。次數不必多:真的是暫時性的
 #: 抖動,隔一個 delay 再問一次就好;真的壞掉,問十次也一樣。
 CLASS_PAGE_ATTEMPTS = 3
+
+
+#: 一輪最多為了查證停開多打幾個請求。消失的課超過這個數就改成**抽樣**。
+#:
+#: 抽樣而不是直接拒絕:真的大批停開是會發生的(README 記過一次 265 門的
+#: bulk_change),而「超過就一律不發布」對那種情況是**永久卡死** —— 那些課
+#: 不會再回來,每一輪都會卡在同一個地方。抽樣兩邊都顧得到:抓取缺口一定是
+#: 整批「課還在」,抽幾門就現形;真的大批停開則是整批「查無課號」,抽樣會過。
+REMOVAL_VERIFY_LIMIT = 30
 
 
 class IncompleteCrawl(RuntimeError):
@@ -288,6 +298,8 @@ def crawl(
     *,
     only_departments: list[str] | None = None,
     known_groups: dict[str, list[ClassGroup]] | None = None,
+    known_courses: set[str] | None = None,
+    removal_budget: int = REMOVAL_VERIFY_LIMIT,
 ) -> CrawlResult:
     """跑完整條 format=-2 → -3 → -4 的抓取流程。
 
@@ -298,6 +310,11 @@ def crawl(
     幾個班級連結,而「少列」解析得成功、不觸發任何錯誤路徑 —— 那個班級
     底下只出現在該處的課就會安靜消失,並被異動偵測記成停開。帶著上一輪的
     名單就能把少列的班級補抓回來。
+
+    `known_courses` 是上一輪索引裡這個學年期的課號,由 `read_index_course_ids()`
+    讀來。上面那些防線都是針對**已知的**壞法;這一條是最後一道,不管課為什麼
+    消失都適用:凡是「上一輪有、這一輪沒有」的課,去大綱頁跟學校要一句話,
+    學校說查無課號才算停開(見 `_verify_removals()`)。
     """
     started = time.monotonic()
     result = CrawlResult(year=year, sem=sem, partial=bool(only_departments))
@@ -368,8 +385,84 @@ def crawl(
         )
 
     result.courses = sorted(merged.values(), key=lambda c: c.id)
+    _verify_removals(fetcher, result, known_courses, removal_budget)
     result.elapsed = time.monotonic() - started
     return result
+
+
+def _verify_removals(
+    fetcher: Fetcher,
+    result: CrawlResult,
+    known_courses: set[str] | None,
+    budget: int,
+) -> None:
+    """「上一輪有、這一輪沒有」的課,要學校說停開才算停開。
+
+    停開判定原本是**用缺席推論**的,而缺席有兩種原因 —— 課真的停開了,或者
+    我們這一輪讀錯了 —— 兩者在輸出上一模一樣。上面那些防線各自針對一種已知
+    的壞法(單位頁少列班級、班級頁沒有表格);這一條不管原因,只問結果。
+
+    證據來自大綱頁:課不在開課資料裡時,學校會明講「查無課號 (N) 的開課資料」
+    (`parse_syllabus.course_exists()`,2026-09-09 實抓兩門真停開確認)。課表頁
+    跟大綱頁讀的是**同一份開課資料**,所以「大綱頁查得到、課表頁沒列到」在
+    邏輯上互相矛盾 —— 那不是停開,是我們讀錯了。
+
+    成本平常是零:真停開很少,沒有候選就一個請求都不發。判不出來(版面不認得、
+    請求失敗)一律當成沒有證據 —— **沒有證據就不記停開,也不發布這一輪**。
+    """
+    if not known_courses:
+        # 第一次抓這個學期,或它已經被擠出頂層索引的涵蓋範圍 —— 沒有基準,
+        # 異動偵測那邊也只會記一筆 baseline,這裡沒事可做。
+        return
+
+    gone = sorted(known_courses - {c.id for c in result.courses})
+    if not gone:
+        return
+
+    checked = gone[:budget]
+    if len(gone) > budget:
+        # 抽樣。抓取缺口一定是整批「課還在」,抽幾門就現形;真的大批停開是
+        # 整批「查無課號」,抽樣會過 —— 不會像「超過就拒絕」那樣永久卡死。
+        log.warning(
+            "%s 有 %d 門課消失了,超過查證上限 %d,只抽前 %d 門問",
+            result.semester, len(gone), budget, len(checked),
+        )
+    else:
+        log.info("%s 有 %d 門課消失了,逐筆跟學校查證", result.semester, len(gone))
+
+    unproven: list[str] = []
+
+    for course_id in checked:
+        try:
+            page = fetcher.fetch("ShowSyllabus.jsp", params={"snum": course_id})
+            verdict = course_exists(page, course_id)
+        except Exception as exc:
+            log.error("課號 %s 查不到大綱頁,無法判定是不是停開:%s", course_id, exc)
+            verdict = None
+
+        if verdict is False:
+            log.info("課號 %s:學校回查無課號,確認停開", course_id)
+            continue
+
+        unproven.append(course_id)
+        result.errors.append(
+            {
+                "stage": "unproven_removal",
+                "course_id": course_id,
+                "error": (
+                    "這門課從資料集消失了,但學校的開課資料裡還查得到"
+                    if verdict
+                    else "這門課從資料集消失了,而大綱頁判不出它還在不在"
+                ),
+            }
+        )
+
+    if unproven:
+        raise IncompleteCrawl(
+            f"{result.semester} 有 {len(unproven)} 門課從資料集消失,"
+            f"但學校那邊沒有證實停開({', '.join(unproven)}),"
+            "不記成停開,也不輸出這一輪"
+        )
 
 
 def _restore_missing_groups(
@@ -1231,6 +1324,17 @@ def main(argv: list[str] | None = None) -> int:
                 # 上一輪的班級名單。單位頁少列一個班級不會產生任何錯誤,
                 # 底下的課會安靜消失並被記成停開 —— 見 _restore_missing_groups()。
                 known_groups=read_class_groups(args.out, semester.path),
+                # 上一輪索引裡的課號。凡是這一輪少掉的,要學校說「查無課號」
+                # 才算停開 —— 見 _verify_removals()。
+                #
+                # **--dept 的局部抓取不給基準。** 那一輪只抓了幾個系所,拿全校
+                # 的索引來比,沒抓的兩千多門課全部都是「消失了」—— 跟
+                # `_write_changes()` 對局部抓取略過變更紀錄是同一個理由。
+                known_courses=(
+                    None
+                    if args.dept
+                    else read_index_course_ids(args.out, semester.year, semester.sem)
+                ),
             )
             result.backfill = bool(args.years)
         except Exception as exc:

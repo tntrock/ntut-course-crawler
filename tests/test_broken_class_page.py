@@ -126,9 +126,11 @@ class TestNoPhantomRemovalReachesTheOutput:
     """整條接起來:第一輪正常,第二輪頁面壞掉,異動頁不可以出現停開。"""
 
     def run_once(self, tmp_path):
+        # 刻意不加 --dept:局部抓取的結果是 partial,`_write_changes()` 會整個
+        # 略過變更紀錄,那樣「沒有停開事件」的斷言會是空的、驗不到東西。
         return main(
             ["--year", "115", "--sem", "1", "--out", str(tmp_path),
-             "--dept", "59", "--log-level", "CRITICAL"]
+             "--log-level", "CRITICAL"]
         )
 
     def events(self, tmp_path):
