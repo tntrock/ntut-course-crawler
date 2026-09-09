@@ -11,23 +11,29 @@ name: backfill
 # 課表有了但大綱還沒抓的學期會重新排進來 —— 它必須先重抓一次課表(約 355
 # 頁),因為每門課的大綱網址只有課表頁面上才有。
 #
-# 2026-09-05 實測學校保留的大綱範圍:96-1 起每學期都有兩千多門課掛著大綱
-# 連結,95-2 以前塌到 12% 以下、而且點進去是沒有內容的空殼。所以補到 96
-# 學年度就是極限,再往前沒有東西可補。
+# 大綱的連結率隨年代遞減:96-1 起每學期兩千多門課掛著連結,95-2 以前塌到
+# 12% 以下。⚠️ 但**「95-2 以前是空殼」那個結論是錯的** —— 後來實抓推翻了
+# (95-2 的體育、92-1 的高等專題都有 outline / schedule / materials),
+# 只是填的人少。90-1 ~ 95-2 共 963 門有連結,值得補,而且**已經補完了**。
 
 on:
-  # 每 6 小時醒來一次,把剩下的學期一批一批補完,不必有人守在線上按。
+  # **只手動觸發。排程在 2026-09-09 拿掉了 —— 90-1 ~ 114-2 全部補完了。**
   #
-  # 一批 6 個學期在 delay=0.5 下約 3.1 小時,間隔 6 小時等於每個循環仍留
-  # 2.8 小時給例行的 crawl —— 加退選期間的人數資料才不會被回補整個餓死。
+  # 原本是 `30 1,7,13,19`,每 6 小時醒來一批 6 個學期。補完之後它只會空轉:
+  # `remaining` 守門讓後面每一步都 skip,一趟約 1.5 分鐘、對學校 0 個請求,
+  # 連 runs.json 都不會留紀錄(`main()` 在「沒有需要更新的學年期」時直接
+  # return,不寫 run summary)—— 看不到、又一直在跑。
   #
-  # 刻意錯開 crawl 的整點排程(它是 `0 */4`):兩者共用 concurrency 群組,
-  # 同一時刻送出時後到的會把待命中的那個擠掉,錯開就少踩到。
+  # 關掉的條件是這支自己訂的:syllabus.json 的 frozen 含 96-1。實際狀態比
+  # 那條線還寬 —— 50 個學期全部收合(90-1 ~ 114-2),115-1 是當期。
   #
-  # 補完之後這個排程會空轉 —— 下面的 `remaining` 守門會讓它什麼都不做就結束。
-  # 確定補完了(syllabus.json 的 frozen 含 96-1)就可以把這段拿掉。
-  schedule:
-    - cron: '30 1,7,13,19 * * *'
+  # 不必擔心以後沒人收合當期的大綱狀態:那件事是 syllabus.yml 做的。
+  # `select_semesters()` 永遠抓最新學期 + 超過 24h 沒更新的,而首頁固定掛
+  # 兩個學期 —— 115-2 出現之後 115-1 還在首頁上、還是會被抓到,那時
+  # `is_frozen_semester(115, 1)` 為真就收合了。**收合不依賴這支。**
+  #
+  # 要重抓某個歷史學期:把它從 syllabus.json 的 frozen 刪掉(或用
+  # all_semesters),再手動按這支。
   workflow_dispatch:
     inputs:
       years:
@@ -60,21 +66,23 @@ jobs:
   backfill:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    # 排程觸發時 inputs 全是空的,所以兩種來源在這裡明確分流。
+    # 只剩 workflow_dispatch 一種來源,所以直接讀 inputs。原本這裡對排程與
+    # 手動各給一組值,排程拿掉之後那一半是死的。
     #
-    # **不要**改寫成 `inputs.x || 預設值`。手動 dispatch 時如果把某個
-    # boolean 取消勾選,它的值是 false,那種寫法會讀成「沒給」而套用預設,
-    # 於是使用者明確關掉的選項又被打開 —— 安靜地做了沒被要求的事。
+    # **不要**改寫成 `inputs.x || 預設值`。取消勾選一個 boolean 時它的值是
+    # false,那種寫法會讀成「沒給」而套用預設,於是使用者明確關掉的選項又被
+    # 打開 —— 安靜地做了沒被要求的事。預設值寫在上面的 `inputs:` 裡就好。
+    #
+    # `years` 的下界是 90 —— 學校首頁列到的最舊學年度。原本寫 96 是因為當時
+    # 認定 95-2 以前的大綱是空殼,那個結論後來實抓推翻了(95-2 的體育、92-1
+    # 的高等專題都有 outline / schedule / materials 的實際內容),只是填的
+    # 人少:90-1 有 17 門、95-2 有 298 門,12 個學期合計 963 門有連結。
     env:
-      # 下界是 90 —— 學校首頁列到的最舊學年度。原本寫 96 是因為當時認定
-      # 95-2 以前的大綱是空殼,那個結論後來實抓推翻了(95-2 的體育、92-1 的
-      # 高等專題都有 outline / schedule / materials 的實際內容),只是填的
-      # 人少:90-1 有 17 門、95-2 有 298 門,12 個學期合計 963 門有連結。
-      YEARS: ${{ github.event_name == 'schedule' && '90-113' || inputs.years }}
-      WITH_SYLLABUS: ${{ github.event_name == 'schedule' && 'true' || inputs.with_syllabus }}
-      DELAY: ${{ github.event_name == 'schedule' && '0.5' || inputs.delay }}
-      MAX_SEMESTERS: ${{ github.event_name == 'schedule' && '6' || inputs.max_semesters }}
-      ALL_SEMESTERS: ${{ github.event_name == 'schedule' && 'false' || inputs.all_semesters }}
+      YEARS: ${{ inputs.years }}
+      WITH_SYLLABUS: ${{ inputs.with_syllabus }}
+      DELAY: ${{ inputs.delay }}
+      MAX_SEMESTERS: ${{ inputs.max_semesters }}
+      ALL_SEMESTERS: ${{ inputs.all_semesters }}
     steps:
       - uses: actions/checkout@v7
 
@@ -145,7 +153,7 @@ jobs:
             echo "尚無任何學期資料"
           fi
 
-      # 還有沒有學期要補?排程每 6 小時醒來一次,補完之後就沒事做了。
+      # 還有沒有學期要補?現在全部補完了,所以手動按下去多半就停在這一步。
       #
       # 判斷直接呼叫爬蟲自己選學期的那個函式,不在這裡用 bash 重寫一套 ——
       # 兩份邏輯遲早會漂移,而漂移的後果是「明明還沒補完卻跳過」。

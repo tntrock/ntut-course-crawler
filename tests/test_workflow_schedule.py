@@ -1,12 +1,17 @@
-"""回補的排程,以及「醒來但沒事做」時的守門。
+"""回補的觸發方式,以及「醒來但沒事做」時的守門。
 
-排程補完 96-1 之後仍然會每 6 小時醒來一次。這個檔守的是**空轉的那幾次
-什麼都不要留下**,尤其是不可以寫 `runs.json` —— 它只保留最近 120 筆,
-一天 4 筆空紀錄幾天就會把真正的執行紀錄整個擠光,狀態頁跟著失真。
+2026-09-09:**回補的排程拿掉了** —— 90-1 ~ 114-2 全部補完收合,排程只剩
+空轉。空轉一趟對學校是 0 個請求,但仍然要 checkout、跑測試、clone 一次
+gh-pages,而且**連 runs.json 都不會留紀錄**(`main()` 在「沒有需要更新的
+學年期」時直接 return,不寫 run summary)—— 看不到、又一直在跑。
 
-另一件事是排程與手動的參數不可以混用。`inputs.x || 預設` 這種寫法在
-手動 dispatch 且把 boolean 取消勾選時會讀成「沒給」,於是預設值把使用者
-明確關掉的選項又打開 —— 所以一律用 `github.event_name` 明確分流。
+守門本身留著,而且照樣要驗:手動按下去時它一樣是那道防線,尤其不可以寫
+`runs.json` —— 那個檔只保留最近 120 筆,幾筆空紀錄就會把真正的執行紀錄
+往外擠,狀態頁跟著失真。
+
+參數那條規則也留著:`inputs.x || 預設` 在手動 dispatch 且把 boolean 取消
+勾選時會讀成「沒給」,於是預設值把使用者明確關掉的選項又打開 —— 那是安靜
+地做了沒被要求的事。預設值寫在 `inputs:` 裡,env 直接讀 inputs 就好。
 """
 
 from __future__ import annotations
@@ -45,40 +50,49 @@ def guard_index(items: list[dict]) -> int:
     raise AssertionError(f"找不到 id 為 {GUARD_ID!r} 的守門步驟")
 
 
-class TestSchedule:
-    def test_backfill_runs_on_a_schedule(self) -> None:
-        """沒有排程的話,整個序列就得靠有人在線上一批一批按。"""
+class TestTrigger:
+    def test_backfill_is_manual_only(self) -> None:
+        """回補是一次性工作,補完了就不該再排程。
+
+        90-1 ~ 114-2 全部收合之後,排程每一趟都只是空轉:守門讓後面每一步
+        都 skip,對學校 0 個請求,也不留任何紀錄 —— 看不到、又一直在跑,
+        而且每趟都佔用一次 `crawl` 這個 concurrency 群組。
+
+        真要重新排程(例如哪天發現某批歷史資料有缺口),請一併想清楚它什麼
+        時候會停 —— 上一輪的教訓是排程補完之後沒人記得關掉。
+        """
         # yaml 會把 `on:` 解析成布林 True,不是字串 "on"
         triggers = workflow()[True]
-        assert "schedule" in triggers
-        assert triggers["schedule"][0]["cron"]
+        assert "workflow_dispatch" in triggers
+        assert "schedule" not in triggers, (
+            "回補已經全部補完,排程只會空轉 —— 見這個測試的說明"
+        )
 
-    def test_scheduled_runs_do_not_read_dispatch_inputs(self) -> None:
-        """排程時 inputs 全是空的,必須用 event_name 明確分流。
+    def test_env_never_falls_back_to_a_default_with_or(self) -> None:
+        """`inputs.x || 預設` 會把使用者明確關掉的選項又打開。
 
-        寫成 `inputs.with_syllabus || 'true'` 的話,手動 dispatch 且取消
-        勾選時會被預設值又打開 —— 那是安靜地做了使用者沒要求的事。
+        取消勾選一個 boolean 時它的值是 false,那種寫法會讀成「沒給」而
+        套用預設 —— 安靜地做了沒被要求的事。預設值寫在 `inputs:` 裡。
         """
         env = workflow()["jobs"]["backfill"]["env"]
         for key in ("YEARS", "WITH_SYLLABUS", "DELAY", "MAX_SEMESTERS"):
-            assert "github.event_name" in str(env[key]), (
-                f"{key} 直接讀 inputs,排程觸發時會拿到空值"
+            assert "||" not in str(env[key]), (
+                f"{key} 用了 `||` 當預設值,取消勾選的選項會被它打開"
             )
 
-    def test_the_scheduled_range_reaches_the_oldest_semester(self) -> None:
-        """排程的範圍要一路涵蓋到學校最舊的那個學年度。
+    def test_the_default_range_reaches_the_oldest_semester(self) -> None:
+        """手動觸發的預設範圍要一路涵蓋到學校最舊的那個學年度。
 
-        排程的 YEARS 是寫死的,跟手動 dispatch 的預設(90-114)各走各的。
-        兩邊不一致時,「照排程慢慢補齊」會變成一個永遠不會兌現的承諾 ——
-        而且**完全沒有徵兆**:序列會在範圍的下界停住,`syllabus.json` 看起來
-        每個學期都收合了,狀態頁也不會少一列,就只是那幾個學期從來沒出現過。
+        範圍的下界寫太高的話,補不到的那幾個學期**完全沒有徵兆**:回補會在
+        下界停住,`syllabus.json` 看起來每個學期都收合了,狀態頁也不會少一列,
+        就只是那幾個學期從來沒出現過。
         """
-        env = workflow()["jobs"]["backfill"]["env"]
-        scheduled = re.search(r"'(\d+)-(\d+)'", str(env["YEARS"]))
-        assert scheduled, "找不到排程用的學年度範圍"
-        assert int(scheduled.group(1)) <= OLDEST_YEAR, (
-            f"排程只從 {scheduled.group(1)} 開始補,"
-            f"{OLDEST_YEAR}-{int(scheduled.group(1)) - 1} 學年度永遠輪不到"
+        years = workflow()[True]["workflow_dispatch"]["inputs"]["years"]["default"]
+        low = re.match(r"(\d+)-(\d+)", str(years))
+        assert low, f"預設的學年度範圍看不懂:{years!r}"
+        assert int(low.group(1)) <= OLDEST_YEAR, (
+            f"預設只從 {low.group(1)} 開始補,"
+            f"{OLDEST_YEAR}-{int(low.group(1)) - 1} 學年度按下去也輪不到"
         )
 
 
