@@ -62,19 +62,26 @@ const STAGES = {
   semester: { label: "整個學期", hint: "這個學期完全抓不到,下次執行會重試。" },
   department: { label: "系所單位", hint: "這個單位的課全部沒抓到。" },
   class_group: { label: "班級", hint: "單位有抓到,但這個班級的課表沒抓到。" },
+  class_group_broken: { label: "班級課表頁壞掉", hint: "重抓幾次都沒有課程表格,這個學期這一輪不發布。" },
+  class_group_missing: { label: "單位頁少列班級", hint: "已用上一輪的名單補抓,資料沒有缺。學校偶發少列,持續出現才需要查。" },
+  unproven_removal: { label: "未證實的停開", hint: "課從資料集消失,但學校沒說查無課號,這一輪不發布。" },
+  classroom: { label: "教室容量", hint: "課程資料正常,只有教室容量沒抓到。" },
   syllabus: { label: "教學大綱", hint: "課程資料正常,只有大綱內容沒抓到。" },
 };
 
 function describe(e) {
-  if (e.stage === "class_group") {
+  if (e.class_group_id) {
     return esc(e.department_name) + " · " + esc(e.class_group_name) +
       ' <span class="dim">(' + esc(e.class_group_id) + ")</span>";
   }
   if (e.stage === "department") {
     return esc(e.department_name) + ' <span class="dim">(' + esc(e.department_id) + ")</span>";
   }
-  if (e.stage === "syllabus") {
-    return esc(e.course_name) + ' <span class="dim">(' + esc(e.course_id) + ")</span>";
+  if (e.course_id) {
+    return esc(e.course_name || "") + ' <span class="dim">(' + esc(e.course_id) + ")</span>";
+  }
+  if (e.classroom_id) {
+    return esc(e.classroom_name) + ' <span class="dim">(' + esc(e.classroom_id) + ")</span>";
   }
   return '<span class="dim">整個學期</span>';
 }
