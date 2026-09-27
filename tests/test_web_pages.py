@@ -289,3 +289,18 @@ class TestClassIdsRenderAsNames:
         assert 'f === "class_ids"' in self.changes_js(), (
             "course_changed 的 class_ids 欄位沒有換成名稱"
         )
+
+
+class TestDepartmentIdsRenderAsNames:
+    """單位代號(B2、35)跟班級一樣要換名稱:教師事件、整批異動、開課單位欄位。"""
+
+    def test_teacher_events_do_not_join_department_ids_raw(self) -> None:
+        assert "e.department_ids.join(" not in javascript("changes.html")
+
+    def test_bulk_change_tally_translates_department_ids(self) -> None:
+        src = javascript("changes.html")
+        start = src.index("tally(e.by_department")
+        assert "deptName" in src[start : src.index("\n", start)]
+
+    def test_department_ids_field_change_translates(self) -> None:
+        assert 'f === "department_ids"' in javascript("changes.html")

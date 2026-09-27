@@ -130,30 +130,43 @@ function tally(obj, limit, fmt) {
  * classes.json 也可能沒讀到。退回代號至少還能對得上原始資料。 */
 function className(index, semester, id) {
   const map = index[semester];
-  return (map && map[id]) || id;
+  return (map && map.classes[id]) || id;
 }
 
-/** 建代號→名稱的對照表,一個學期一份。
+/** 單位代號 → 名稱。同樣查不到就退回代號。 */
+function deptName(index, semester, id) {
+  const map = index[semester];
+  return (map && map.depts[id]) || id;
+}
+
+/** 建班級、單位的代號→名稱對照表,一個學期一份。
  *
  * changes.json 只存代號(3014),名稱在各學期的 classes.json 裡。**一定要
  * 分學期**:同一個代號在不同學期是不同的班,共用一份全域對照會張冠李戴。
  *
  * 只抓「事件裡真的出現過班級」的學期 —— 平常就是當期那一支。任何一支讀
  * 不到就讓那個學期沿用代號,絕不讓整頁跟著壞:這份對照表是錦上添花,
- * 異動內容本身不靠它。 */
+ * 異動內容本身不靠它。
+ *
+ * 單位名稱也從 classes.json 拿(每個班級都帶 department_name)——
+ * 事件裡的單位一定是某個班級的單位,不必再多讀 departments.json。 */
 async function classNameIndex(events) {
   const wanted = events.filter(e =>
     (e.class_ids && e.class_ids.length) || e.by_class ||
-    (e.changes && e.changes.class_ids));
+    (e.department_ids && e.department_ids.length) || e.by_department ||
+    (e.changes && (e.changes.class_ids || e.changes.department_ids)));
   const semesters = [...new Set(wanted.map(e => e.semester))].filter(Boolean);
   const index = {};
   const results = await Promise.allSettled(
     semesters.map(s => loadJSON(s + "/classes.json")));
   results.forEach((r, i) => {
     if (r.status !== "fulfilled") return;
-    const map = {};
+    const map = { classes: {}, depts: {} };
     (r.value.classes || []).forEach(c => {
-      if (c && c.id) map[c.id] = c.name;
+      if (c && c.id) map.classes[c.id] = c.name;
+      if (c && c.department_id && c.department_name) {
+        map.depts[c.department_id] = c.department_name;
+      }
     });
     index[semesters[i]] = map;
   });
@@ -175,7 +188,7 @@ function describe(e, index) {
       .map(s => "<li>" + (TYPES[s.type] ? esc(TYPES[s.type].label) : esc(s.type)) + " · " +
         esc(s.name || s.id) + "</li>").join("");
     return "<b>整批異動 " + num(e.event_count) + " 筆</b>(" + esc(counts) + ")" +
-      '<div class="dim">依單位:' + tally(e.by_department, 10) + "</div>" +
+      '<div class="dim">依單位:' + tally(e.by_department, 10, id => deptName(index, e.semester, id)) + "</div>" +
       '<div class="dim">依班級:' +
         tally(e.by_class, 8, id => className(index, e.semester, id)) + "</div>" +
       (samples ? "<ul style=\"margin:.4rem 0 0 1.1rem;padding:0\">" + samples + "</ul>" : "") +
@@ -188,7 +201,7 @@ function describe(e, index) {
     return "<b>" + esc(e.name) + "</b> " + verb +
       "(" + num(e.course_count) + " 門)" +
       (e.department_ids && e.department_ids.length
-        ? '<div class="dim">單位:' + esc(e.department_ids.join("、")) + "</div>" : "") +
+        ? '<div class="dim">單位:' + esc(e.department_ids.map(id => deptName(index, e.semester, id)).join("、")) + "</div>" : "") +
       '<div class="dim">換人授課時課還在,只有教師這一端看得出來。</div>';
   }
 
@@ -203,9 +216,9 @@ function describe(e, index) {
 
   if (e.type === "course_changed" && e.changes) {
     const rows = Object.keys(e.changes).map(f => {
-      // 只有 class_ids 這一欄的值是代號;上課時間、學分那些照原樣印。
-      const fmt = f === "class_ids"
-        ? (id => className(index, e.semester, id)) : null;
+      // 只有 class_ids、department_ids 的值是代號;上課時間、學分那些照原樣印。
+      const fmt = f === "class_ids" ? (id => className(index, e.semester, id))
+        : f === "department_ids" ? (id => deptName(index, e.semester, id)) : null;
       return "<li>" + esc(FIELDS[f] || f) + ":" +
         '<span class="dim">' + esc(value(e.changes[f].from, fmt)) + "</span> → " +
         esc(value(e.changes[f].to, fmt)) + "</li>";

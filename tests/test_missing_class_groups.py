@@ -193,3 +193,44 @@ class TestMainUsesThePreviousRunsGroups:
         code = main(["--year", "115", "--sem", "1", "--out", str(tmp_path),
                      "--dept", "59", "--log-level", "CRITICAL"])
         assert code == 0
+
+
+class WithdrawnGroupFetcher(FakeFetcher):
+    """少列的班級課表頁是「表格在、一門課都沒有」—— 學校真的撤班了。"""
+
+    def fetch(self, url, *, params=None):
+        page = super().fetch(url, params=params)
+        if (params or {}).get("code") == DROPPED and int(params.get("format", 0)) == -4:
+            from crawler.parse_course import parse_courses
+
+            saved, self.hide_courses = self.hide_courses, {c.id for c in parse_courses(page)}
+            page = self._course_page()
+            self.hide_courses = saved
+        return page
+
+
+class TestAWithdrawnGroupIsForgotten:
+    """2026-09 線上:班級 3223 撤班後每一輪都記一筆 class_group_missing。
+
+    補抓回來 0 門就是撤班,不能再寫回 classes.json,不然下一輪又補抓、又記錯誤。
+    """
+
+    def crawl(self):
+        fetcher = WithdrawnGroupFetcher(drop_class_groups={DROPPED})
+        return crawl(
+            fetcher, 115, 1,
+            only_departments=["59"],
+            known_groups=known(*ALL_GROUPS),
+        )
+
+    def test_no_error_is_recorded(self):
+        assert [e for e in self.crawl().errors if e["stage"] == "class_group_missing"] == []
+
+    def test_it_is_dropped_from_the_group_list(self):
+        assert DROPPED not in {g.id for g in self.crawl().class_groups["59"]}
+
+    def test_a_listed_empty_group_is_kept(self):
+        """單位頁有列的 0 門班級照留 —— 學校說它存在。"""
+        fetcher = WithdrawnGroupFetcher()
+        result = crawl(fetcher, 115, 1, only_departments=["59"], known_groups=known(*ALL_GROUPS))
+        assert DROPPED in {g.id for g in result.class_groups["59"]}

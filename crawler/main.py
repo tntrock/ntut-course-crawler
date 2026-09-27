@@ -469,7 +469,6 @@ def _restore_missing_groups(
     dept: Department,
     groups: list[ClassGroup],
     known: list[ClassGroup],
-    result: CrawlResult,
 ) -> list[ClassGroup]:
     """把單位頁這次沒列到、但上一輪有的班級補回名單。
 
@@ -483,33 +482,15 @@ def _restore_missing_groups(
 
     補抓靠的是「班級代碼本身就足以取得課表」:`format=-4&code=2764` 單獨
     打得通,不需要單位頁先列出它。真的被學校撤掉的班級,補抓回來的頁面
-    會是 0 門課,課程層級的停開判定照樣正確。
+    會是 0 門課 —— `_crawl_department()` 看到這種情況就把它從名單拿掉,
+    不然它會被寫回 classes.json、下一輪又被補抓,永遠記一筆錯誤
+    (2026-09 線上的班級 3223 半導體二就是這樣)。
     """
     if not known:
         return groups
 
     listed = {group.id for group in groups}
-    missing = [group for group in known if group.id not in listed]
-    if not missing:
-        return groups
-
-    for group in missing:
-        log.warning(
-            "單位 %s (%s) 這次沒列出班級 %s (%s),改用上一輪的名單補抓",
-            dept.name, dept.id, group.name, group.id,
-        )
-        result.errors.append(
-            {
-                "stage": "class_group_missing",
-                "department_id": dept.id,
-                "department_name": dept.name,
-                "class_group_id": group.id,
-                "class_group_name": group.name,
-                "url": group.url,
-                "error": "單位頁這次沒列出這個班級,已用上一輪的名單補抓",
-            }
-        )
-    return groups + missing
+    return groups + [group for group in known if group.id not in listed]
 
 
 def _fetch_class_courses(
@@ -553,7 +534,9 @@ def _crawl_department(
 ) -> list[ClassGroup]:
     html = fetcher.fetch("Subj.jsp", params={"format": -3, "code": dept.id, **params})
     groups = parse_class_groups(html, dept.id)
-    groups = _restore_missing_groups(dept, groups, known, result)
+    listed = {group.id for group in groups}
+    groups = _restore_missing_groups(dept, groups, known)
+    withdrawn: set[str] = set()
 
     for group in groups:
         try:
@@ -595,6 +578,32 @@ def _crawl_department(
             )
             continue
 
+        if group.id not in listed:
+            if not courses:
+                # 單位頁沒列、補抓回來也是 0 門:學校真的撤掉這個班級了。
+                # 從名單拿掉,下一輪就不會再補抓、再記錯誤。
+                log.info(
+                    "班級 %s (%s) 單位頁沒列、課表也是空的,視為已撤班",
+                    group.name, group.id,
+                )
+                withdrawn.add(group.id)
+                continue
+            log.warning(
+                "單位 %s (%s) 這次沒列出班級 %s (%s),改用上一輪的名單補抓",
+                dept.name, dept.id, group.name, group.id,
+            )
+            result.errors.append(
+                {
+                    "stage": "class_group_missing",
+                    "department_id": dept.id,
+                    "department_name": dept.name,
+                    "class_group_id": group.id,
+                    "class_group_name": group.name,
+                    "url": group.url,
+                    "error": "單位頁這次沒列出這個班級,已用上一輪的名單補抓",
+                }
+            )
+
         if not courses:
             # 表格在、但一門課都沒有。這是合法的 0 門(班級被撤空),不當成
             # 失敗 —— 但 115-1 的 293 個班級正常情況一個 0 門的都沒有,
@@ -620,7 +629,7 @@ def _crawl_department(
                 existing.merge_from(course)
                 result.merged_courses += 1
 
-    return groups
+    return [group for group in groups if group.id not in withdrawn]
 
 
 # --------------------------------------------------------------------------
