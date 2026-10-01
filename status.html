@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>爬蟲狀態 · 北科課程資料</title>
+<meta name="description" content="北科課程資料爬蟲的執行狀態:最近幾次跑得如何、各學期資料多新、教學大綱補到哪。">
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-SJF3YWLFMQ"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-SJF3YWLFMQ');
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<nav class="pages">
+  <a href="index.html">首頁</a>
+  <a href="status.html" aria-current="page">狀態</a>
+  <a href="errors.html">錯誤</a>
+  <a href="changes.html">異動</a>
+</nav>
+
+<h1>爬蟲狀態</h1>
+<p class="lede">
+  這頁只讀發布出去的靜態 JSON,沒有後端。
+  課程與人數每 4 小時抓一次、教學大綱一天兩次。
+</p>
+
+<div id="health" class="health unknown"><b>讀取中…</b></div>
+
+<div class="toolbar">
+  <button id="refresh" type="button">重新整理</button>
+  <span class="when" id="loaded-at"></span>
+</div>
+
+<div class="stats" id="cards"></div>
+
+<div class="note">
+  <strong>排程時間不是執行時間。</strong>GitHub Actions 只保證「不早於」,
+  這個專案實測常延遲 2~4 小時。判斷有沒有漏跑請看下面的實際執行紀錄,
+  不要拿排程時間推論。
+</div>
+
+<h2>最近的執行</h2>
+<div id="runs"><p class="empty">讀取中…</p></div>
+
+<h2>各學期資料</h2>
+<div id="semesters"><p class="empty">讀取中…</p></div>
+
+<h2>修課人數快照</h2>
+<div id="enrollment"><p class="empty">讀取中…</p></div>
+
+<h2>教室容量</h2>
+<div id="capacity"><p class="empty">讀取中…</p></div>
+
+<footer>
+  課程資料本身走 <a href="index.json">index.json</a> 與各學期端點,清單見
+  <a href="index.html">首頁</a>。這頁刻意不載入 index.json —— 它有 1.8 MB,
+  只為了數一個數字並不划算。 ·
+  <a href="https://github.com/tntrock/ntut-course-crawler">原始碼</a>
+</footer>
+
+</main>
+
+<script src="app.js"></script>
+<script>
+/** 當期學期的資料時間。
+ *
+ * **不要用 meta.generated_at** —— 那是「meta.json 最後被寫的時間」,回補一個
+ * 十幾年前的歷史學期也會把它推新。拿它當「資料多新」會在回補期間一路顯示
+ * 綠燈,就算當期的 crawl 連掛好幾班也看不出來 —— 那正好違背這個燈號的目的。
+ */
+function currentSemesterTime(meta) {
+  const entry = (meta.semesters || []).find(x => x.path === meta.latest);
+  return entry ? entry.generated_at : meta.generated_at;
+}
+
+function statusBadge(status) {
+  const cls = status === "success" ? "ok" : status === "failure" ? "bad" : "warn";
+  const label = { success: "成功", failure: "失敗", cancelled: "被砍" }[status] || status;
+  return '<span class="badge ' + cls + '">' + esc(label) + "</span>";
+}
+
+/** 一筆執行紀錄抓了幾頁。
+ *
+ * f754d78 之前的紀錄用 `requests`,之後改成 `requests_ok` + `failed_urls` ——
+ * 舊紀錄還留在 runs.json 裡(最多 120 筆),兩種都要讀得出來。 */
+function requestCount(run) {
+  const ok = typeof run.requests_ok === "number" ? run.requests_ok : run.requests;
+  if (typeof ok !== "number") return "—";
+  const failed = run.failed_urls;
+  return num(ok) + (failed ? ' <span class="badge bad">' + num(failed) + " 失敗</span>" : "");
+}
+
+/** 這次嘗試跑了多久。舊紀錄的欄位叫 `started_at`。 */
+function runDuration(run) {
+  const from = run.attempt_started_at || run.started_at;
+  if (!from) return "—";
+  const secs = (new Date(run.at) - new Date(from)) / 1000;
+  return isFinite(secs) && secs >= 0 ? duration(secs) : "—";
+}
+
+function render() {
+  // 五個檔各抓一次,分給下面各區塊用。
+  const runs = loadJSON("runs.json");
+  const meta = loadJSON("meta.json");
+  const errors = loadJSON("errors.json");
+  const syllabus = loadJSON("syllabus.json");
+  const enrollment = loadJSON("enrollment.json");
+  const capacity = loadJSON("capacity.json");
+
+  // ---- 健康燈號 ----
+  block("health", Promise.all([runs, meta]), (node, [r, m]) => {
+    const last = (r.runs || []).find(x => x.workflow === "crawl") || (r.runs || [])[0];
+    const fresh = currentSemesterTime(m);
+    const age = hoursSince(fresh);
+    let cls = "ok", head = "✓ 正常", note = "";
+
+    if (last && last.status === "failure") {
+      cls = "bad";
+      head = "✕ 上一班失敗";
+      note = "已完成的部分仍會發布,下一班會自動接續。";
+    } else if (last && last.status === "cancelled") {
+      cls = "warn";
+      head = "! 上一班被中止";
+      note = "多半是 job 逾時,抓到一半的部分已經發布。";
+    } else if (age > 8) {
+      cls = "warn";
+      head = "! 資料延遲中";
+      note = esc(m.latest) + " 的資料是 " + relative(fresh) +
+             "更新的。排程每 4 小時一次,實測常延遲 2~4 小時,超過 8 小時才值得看一眼。";
+    } else {
+      note = esc(m.latest) + " 的資料是 " + relative(fresh) + "更新的。";
+    }
+    node.className = "health " + cls;
+    node.innerHTML = "<b>" + esc(head) + "</b><span>" + esc(note) + "</span>";
+  });
+
+  // ---- 數字卡 ----
+  // 用 allSettled:四張卡來自四個檔,其中一個讀不到時另外三張還是要出得來。
+  block("cards", Promise.allSettled([meta, runs, errors, syllabus]), (node, results) => {
+    const [m, r, e, s] = results.map(x => (x.status === "fulfilled" ? x.value : null));
+
+    // runs.json 最多留 120 筆,取 100 筆等於「幾乎全部」—— 成功率因此
+    // 反映的是一段長期趨勢,不會被最近一兩次失敗拉到很難看。
+    const recent = r ? (r.runs || []).slice(0, 100) : [];
+    const ok = recent.filter(x => x.status === "success").length;
+    const rate = recent.length ? Math.round((ok / recent.length) * 100) + "%" : "—";
+
+    const frozen = s ? Object.keys(s.frozen || {}).length : null;
+
+    const cards = [
+      [m ? taipei(currentSemesterTime(m)) : "—", "當期資料時間 (UTC+8)"],
+      [rate, "最近 " + (recent.length || 0) + " 次成功率"],
+      [e ? num(e.error_count) : "—", "目前抓取失敗數"],
+      [frozen === null ? "—" : num(frozen), "大綱已補完學期"],
+    ];
+    node.innerHTML = cards
+      .map(([b, label]) =>
+        '<div class="stat"><b>' + esc(b) + "</b><span>" + esc(label) + "</span></div>")
+      .join("");
+  });
+
+  // ---- 執行紀錄 ----
+  block("runs", runs, (node, r) => {
+    // 最多渲染 100 筆(runs.json 本身保留 120),預設只顯示前 20 列。
+    const list = (r.runs || []).slice(0, 100);
+    if (!list.length) {
+      node.innerHTML = '<p class="empty">還沒有執行紀錄。</p>';
+      return;
+    }
+    const rows = list.map(run => {
+      const failed = (run.failed_semesters || []).length
+        ? '<span class="badge bad">未完成:' + esc(run.failed_semesters.join("、")) + "</span>"
+        : "";
+      // detail: false 是「爬蟲根本沒來得及寫側寫檔」,不是「抓了 0 頁」。
+      const detail = run.detail === false
+        ? '<span class="dim">無明細</span>'
+        : (run.semesters || []).map(s =>
+            "<div>" + esc(s.semester) + ":課程 " + num(s.courses) +
+            "、單位 " + num(s.departments_ok) +
+            (s.departments_failed ? "(失敗 " + num(s.departments_failed) + ")" : "") +
+            (s.syllabus_fetched
+              ? "、大綱抓 " + num(s.syllabus_fetched) + " 寫 " + num(s.syllabus_written)
+              : "") +
+            "、耗時 " + duration(s.seconds) + "</div>").join("") ||
+          '<span class="dim">這次沒有完成任何學期</span>';
+
+      return "<tr>" +
+        "<td>" + esc(relative(run.at)) + '<br><span class="dim">' + esc(taipei(run.at)) + "</span></td>" +
+        "<td>" + esc(run.workflow) + '<br><span class="dim">' + esc(run.event || "") + "</span></td>" +
+        "<td>" + statusBadge(run.status) +
+          (run.attempts > 1 ? ' <span class="badge plain">重試 ' + esc(run.attempts) + " 次</span>" : "") +
+          (failed ? "<br>" + failed : "") + "</td>" +
+        '<td class="num">' + esc(runDuration(run)) + "</td>" +
+        '<td class="num">' + requestCount(run) + "</td>" +
+        "<td>" + (run.url ? '<a href="' + esc(run.url) + '">紀錄</a>' : "") +
+          '<details class="row"><summary>明細</summary><div class="inner">' +
+          detail + "</div></details></td>" +
+        "</tr>";
+    }).join("");
+
+    node.innerHTML =
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>時間</th><th>工作流程</th><th>結果</th><th>耗時</th><th>抓取頁數</th><th></th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">共 ' + num(r.run_count) +
+      " 筆,保留最近 120 次。「重試」是 workflow 內部整批重跑的次數,跟 Actions 上的 re-run 不是同一件事。</p>";
+
+    collapsibleRows(node, 20, n => "顯示其餘 " + n + " 次執行");
+  });
+
+  // ---- 各學期資料 ----
+  // 課表、教學大綱、人數快照三種資料合成一張表:一個學期有什麼、有多少、
+  // 什麼時候更新的,一列看完,不必在三個區塊之間自己對照。
+  //
+  // allSettled:三個檔各自可能讀不到,少一個只讓那幾欄變「—」,
+  // 不要讓整張表消失。
+  block("semesters", Promise.allSettled([meta, syllabus, enrollment]),
+    (node, results) => {
+      const [m, s, e] = results.map(x => (x.status === "fulfilled" ? x.value : null));
+      if (!m) {
+        node.innerHTML = '<p class="empty failed">讀不到 meta.json,無法列出學期。</p>';
+        return;
+      }
+      const all = (m.semesters || []).slice()
+        .sort((a, b) => semesterKey(b.path) - semesterKey(a.path));
+      if (!all.length) {
+        node.innerHTML = '<p class="empty">meta.json 裡沒有學期。</p>';
+        return;
+      }
+
+      const frozen = (s && s.frozen) || {};
+      const live = {};
+      for (const entry of (s && s.semesters) || []) {
+        if (!entry.frozen) live[entry.semester] = entry;
+      }
+      const snaps = {};
+      for (const snap of (e && e.snapshots) || []) {
+        (snaps[snap.semester] = snaps[snap.semester] || []).push(snap);
+      }
+
+      // 「已收合」是補完後把逐課狀態折成一筆門數;「未補」是課表有、大綱還沒抓。
+      // 兩者要分得出來 —— 一個是完成,一個是待辦。
+      const syllabusCell = path => {
+        const done = frozen[path];
+        if (done) {
+          return num(done.fetched) + ' 份 <span class="badge ok">已收合</span>' +
+            (done.missing
+              ? ' <span class="badge warn">缺 ' + num(done.missing) + "</span>"
+              : "");
+        }
+        const entry = live[path];
+        if (entry) {
+          const pct = entry.with_url
+            ? Math.round((entry.fetched / entry.with_url) * 100) : 0;
+          return num(entry.fetched) + " / " + num(entry.with_url) +
+            ' <span class="dim">(' + pct + "%)</span>";
+        }
+        return s ? '<span class="dim">— 未補</span>' : '<span class="dim">—</span>';
+      };
+
+      const syllabusTime = path => {
+        const at = (frozen[path] && frozen[path].at) ||
+                   (live[path] && live[path].newest_fetch);
+        return at
+          ? esc(relative(at)) + '<br><span class="dim">' + esc(taipei(at)) + "</span>"
+          : '<span class="dim">—</span>';
+      };
+
+      // 人數快照只有還在抓的學期才有(歷史學期的人數早就定案,不再產生新快照)。
+      const enrollCell = path => {
+        const list = snaps[path];
+        if (!list || !list.length) return '<span class="dim">—</span>';
+        const newest = list.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+        return num(list.length) + ' 筆<br><span class="dim">' + esc(newest.date) +
+          "</span>";
+      };
+
+      const row = x => "<tr>" +
+        "<td>" + esc(x.path) +
+          (x.path === m.latest ? ' <span class="badge ok">當期</span>' : "") + "</td>" +
+        '<td class="num">' + num(x.course_count) + "</td>" +
+        "<td>" + syllabusCell(x.path) + "</td>" +
+        '<td class="num">' + enrollCell(x.path) + "</td>" +
+        "<td>" + esc(relative(x.generated_at)) +
+          '<br><span class="dim">' + esc(taipei(x.generated_at)) + "</span></td>" +
+        "<td>" + syllabusTime(x.path) + "</td>" +
+        "<td>" +
+          (x.partial ? '<span class="badge warn">局部抓取</span> ' : "") +
+          (x.failed_department_count
+            ? '<span class="badge bad">' + num(x.failed_department_count) +
+              " 個單位失敗</span>"
+            : (x.partial ? "" : '<span class="badge ok">完整</span>')) +
+        "</td></tr>";
+
+      const head = '<div class="tablewrap"><table><thead><tr>' +
+        "<th>學期</th><th>課程</th><th>教學大綱</th><th>人數快照</th>" +
+        "<th>課表更新</th><th>大綱更新</th><th>狀態</th>" +
+        "</tr></thead><tbody>";
+      node.innerHTML = head + all.map(x => row(x)).join("") + "</tbody></table></div>";
+      collapsibleRows(node, 6, n => "顯示其餘 " + n + " 個歷史學期");
+    });
+
+  // ---- 人數快照 ----
+  // **只列當期學期。** 非當期的學期早就不能加退選,那些快照是靜止的歷史值,
+  // 放在「人數變化」這個區塊裡只會干擾。哪個學期存有幾筆快照是另一回事,
+  // 上面的各學期資料表仍然照實列出 —— 那張表回答的是「有什麼資料」。
+  block("enrollment", Promise.allSettled([enrollment, meta]), (node, results) => {
+    const [e, m] = results.map(x => (x.status === "fulfilled" ? x.value : null));
+    if (!e) {
+      node.innerHTML = '<p class="empty failed">讀不到 enrollment.json。</p>';
+      return;
+    }
+    const latest = m && m.latest;
+    // 最多渲染 50 天,預設只顯示最近 3 天 —— 一個學期上百天的快照全攤開太長。
+    const snaps = (e.snapshots || [])
+      .filter(x => !latest || x.semester === latest)
+      .slice()
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .slice(0, 50);
+
+    if (!snaps.length) {
+      node.innerHTML = '<p class="empty">' +
+        (latest ? esc(latest) + " 還沒有人數快照。" : "還沒有人數快照。") + "</p>";
+      return;
+    }
+
+    // 學期欄拿掉了 —— 過濾之後整欄都是同一個值,留著只是佔空間。
+    const rows = snaps.map(x => "<tr>" +
+      "<td>" + esc(x.date) + "</td>" +
+      '<td class="num">' + num(x.enrolled_total) + "</td>" +
+      '<td class="num">' + num(x.withdrawn_total) + "</td>" +
+      '<td class="num">' + num(x.course_count) + "</td>" +
+      "<td>" + (x.path ? '<a href="' + esc(x.path) + '">逐課</a>' : "") + "</td>" +
+      "</tr>").join("");
+
+    node.innerHTML =
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>日期</th><th>修課人次</th><th>撤選</th><th>課程</th><th></th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">只列' + esc(latest || "當期") +
+      ",日期是台北時區、執行時間是 UTC —— 跨日的邊界上兩者可能差一天。</p>";
+
+    collapsibleRows(node, 3, n => "顯示其餘 " + n + " 天");
+  });
+
+  // ---- 教室容量 ----
+  //
+  // 這裡的重點是**涵蓋率**,不是總數。全量實測 445 間裡只有 216 間查得到
+  // 座位數 —— 其餘 229 間學校根本沒登記(那格連同使用率欄位一起空白,
+  // 打四個不同學年期都一樣)。只顯示「445 間」會讓人以為每間都有值。
+  //
+  // 依館別拆開才看得出這不是隨機的:一般教學大樓幾乎都有,研究與系館
+  // 幾乎都沒有。那也是判斷「這次是不是抓歪了」最快的方式 —— 平常滿格的
+  // 館別忽然掉下來,就是版面出事了。
+  block("capacity", capacity, (node, c) => {
+    const rooms = c.classrooms || {};
+    const ids = Object.keys(rooms);
+    if (!ids.length) {
+      node.innerHTML = '<p class="empty">還沒有教室容量資料。</p>';
+      return;
+    }
+
+    const entries = ids.map(id => rooms[id]).filter(x => x && typeof x === "object");
+    const withValue = entries.filter(x => typeof x.capacity === "number");
+    const sizes = withValue.map(x => x.capacity).sort((a, b) => a - b);
+    const checked = entries
+      .map(x => x.checked_at)
+      .filter(Boolean)
+      .sort();
+    const last = checked.length ? checked[checked.length - 1] : null;
+
+    const pct = entries.length
+      ? Math.round((withValue.length / entries.length) * 100) : 0;
+
+    // 教室名稱的中文前綴就是館別(「三教202(e)」→「三教」)。
+    const buckets = {};
+    entries.forEach(x => {
+      const match = /^[^0-9]+/.exec(x.name || "");
+      const key = match ? match[0].trim() : "(其他)";
+      const slot = buckets[key] || (buckets[key] = { total: 0, ok: 0 });
+      slot.total += 1;
+      if (typeof x.capacity === "number") slot.ok += 1;
+    });
+
+    const rows = Object.keys(buckets)
+      .sort((a, b) => buckets[b].total - buckets[a].total)
+      .map(name => {
+        const b = buckets[name];
+        const share = Math.round((b.ok / b.total) * 100);
+        return "<tr>" +
+          "<td>" + esc(name) + "</td>" +
+          '<td class="num">' + num(b.ok) + "</td>" +
+          '<td class="num">' + num(b.total) + "</td>" +
+          '<td class="num">' + share + "%</td>" +
+          "</tr>";
+      }).join("");
+
+    node.innerHTML =
+      '<div class="health ' + (withValue.length ? "ok" : "unknown") + '"><b>' +
+      num(withValue.length) + " / " + num(entries.length) + " 間查得到座位數(" +
+      pct + "%)</b><span>" +
+      (sizes.length
+        ? "容量 " + num(sizes[0]) + "～" + num(sizes[sizes.length - 1]) +
+          ",中位數 " + num(sizes[Math.floor(sizes.length / 2)])
+        : "還沒有任何容量值") +
+      (last ? " · 最後確認於 " + esc(taipei(last)) + "(" + esc(relative(last)) + ")"
+            : "") +
+      "</span></div>" +
+      '<div class="tablewrap"><table><thead><tr>' +
+      "<th>館別</th><th>有容量</th><th>教室數</th><th>比例</th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      '<p class="dim" style="font-size:.85rem">空白不是抓取失敗 —— ' +
+      "學校對實驗室與系所空間多半沒有登記座位數。容量與學期無關,每月重抓一輪。</p>";
+
+    collapsibleRows(node, 8, n => "顯示其餘 " + n + " 個館別");
+  });
+}
+
+boot(render);
+</script>
+</body>
+</html>
