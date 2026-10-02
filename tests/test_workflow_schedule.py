@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 BACKFILL = WORKFLOWS_DIR / "backfill.yml"
 CAPACITY = WORKFLOWS_DIR / "capacity.yml"
+RESTORE_ACTION = ROOT / ".github" / "actions" / "restore-gh-pages" / "action.yml"
+RESTORE_USES = "./.github/actions/restore-gh-pages"
 
 #: 學校課程查詢系統最舊的學年度。meta.json 實際涵蓋 90-1 ~ 115-1 共 51 個學期,
 #: 再往前首頁就沒有列了。排程的回補範圍必須低到這裡,否則補不完。
@@ -161,9 +163,9 @@ class TestCapacityWorkflow:
         去撈每個學期自己的 classrooms.json。少了這個 pattern,
         classroom_targets() 只看得到這次剛好爬到的那個學期。
         """
-        run = self.restore_step().get("run", "")
-        assert "classrooms.json" in run
-        assert "sparse-checkout set" in run
+        files = self.restore_step()["with"]["semester-files"].split()
+        assert "classrooms.json" in files
+        assert "classes.json" in files, "覆寫了預設值就要自己把 classes.json 帶上"
 
     def test_crawl_step_does_not_pin_a_single_semester(self) -> None:
         """`--with-capacity` 前面的抓取要用自動偵測(不給 --year/--sem),
@@ -178,14 +180,12 @@ class TestCapacityWorkflow:
 
 
 class TestCapacityRestoredEverywhere:
-    """漏還原 capacity.json 的後果不是「這次抓不到」,是安靜地用空值蓋掉
-    全站的教室容量:crawler.main 的 crawl_capacity 靠 read_capacity(out_dir)
-    帶入上一次的結果,crawler.output 的 write_classrooms 也靠它決定
-    classrooms.json 裡每個房間的 capacity —— 沒有還原,兩邊拿到的都是空字典。
+    """還原步驟收在 `.github/actions/restore-gh-pages`,四支 workflow 共用。
 
-    逐一列出 workflow 檔名的話,以後新增一支忘記還原也不會被抓到,所以
-    改成掃過 `.github/workflows/*.yml` 裡每一個真的有
-    「Restore shared index files」步驟的檔案。
+    漏還原 capacity.json 的後果不是「這次抓不到」,是安靜地用空值蓋掉
+    全站的教室容量;漏了各學期的 classes.json,單位頁少列班級時就會產生
+    假停開(2026-09-07 09:47 一次冒出 10 筆)。兩種漏法都**不會有任何其他
+    測試失敗** —— 讀不到檔案時兩邊都回空 dict、一切照舊。
     """
 
     def restore_steps(self) -> list[tuple[Path, dict]]:
@@ -198,35 +198,36 @@ class TestCapacityRestoredEverywhere:
                         found.append((path, step))
         return found
 
+    def action_script(self) -> str:
+        return yaml.safe_load(RESTORE_ACTION.read_text(encoding="utf-8"))["runs"]["steps"][0]["run"]
+
     def test_there_are_restore_steps_to_check(self) -> None:
-        """保護測試本身:掃描邏輯壞掉、找不到任何 restore 步驟的話,
-        底下的迴圈會什麼都不驗證就安靜通過。"""
+        """保護測試本身:掃描邏輯壞掉的話,底下的迴圈會什麼都不驗證就通過。"""
         assert len(self.restore_steps()) >= 4
 
-    def test_every_restore_step_also_restores_capacity_json(self) -> None:
+    def test_every_restore_step_uses_the_shared_action(self) -> None:
         for path, step in self.restore_steps():
-            assert "capacity.json" in step.get("run", ""), (
-                f"{path.name} 的 Restore shared index files 沒有還原 "
-                "capacity.json,下一次發布會用空值覆蓋掉全站的教室容量"
+            assert step.get("uses") == RESTORE_USES, (
+                f"{path.name} 的還原步驟沒用共用 action,底下兩條保證對它不成立"
             )
 
-    def test_every_restore_step_also_restores_the_class_lists(self) -> None:
-        """每個學期的 `classes.json` 是「單位頁少列班級」的唯一防線。
+    def test_the_action_restores_every_root_json(self) -> None:
+        """capacity.json 在根目錄,`/*.json` 整批撈回來就涵蓋它。"""
+        script = self.action_script()
+        assert "'/*.json'" in script
+        assert "cp \"$path\" data/" in script
 
-        少列不會產生任何錯誤 —— 頁面回 200、解析成功,只是內容變少 ——
-        那個班級底下的課會安靜地從資料集消失,再被異動偵測記成「停開」。
-        2026-09-07 09:47 線上就這樣一次冒出 10 筆假停開。
+    def test_the_action_restores_the_class_lists_by_default(self) -> None:
+        action = yaml.safe_load(RESTORE_ACTION.read_text(encoding="utf-8"))
+        assert "classes.json" in action["inputs"]["semester-files"]["default"].split()
+        script = self.action_script()
+        assert "sparse-checkout set" in script
+        assert '-name "$name"' in script, "有 sparse-checkout pattern 卻沒複製進 data/,等於沒還原"
 
-        `read_class_groups()` 讀不到檔案時回空 dict、一切照舊,所以漏掉
-        這個 pattern **不會有任何測試失敗**,假停開會直接回來。
-        """
+    def test_no_workflow_drops_the_class_lists(self) -> None:
         for path, step in self.restore_steps():
-            run = step.get("run", "")
-            assert "*/classes.json" in run, (
-                f"{path.name} 的 Restore shared index files 沒有撈各學期的 "
-                "classes.json,單位頁少列班級時會產生假停開"
-            )
-            assert "-name classes.json" in run, (
-                f"{path.name} 有 sparse-checkout pattern 卻沒有把檔案複製進 "
-                "data/,等於沒還原"
-            )
+            files = (step.get("with") or {}).get("semester-files")
+            if files is not None:
+                assert "classes.json" in files.split(), (
+                    f"{path.name} 覆寫 semester-files 時漏了 classes.json"
+                )

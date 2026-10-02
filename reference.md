@@ -285,7 +285,7 @@ runner 在美國，跨太平洋連學校主機，偶爾會整段路由抖掉。2
 | 單一請求 | 重試 4 次 × 2 輪（指數退避），約 7.5 分鐘 | `http.py` |
 | 單一系所 | 記進 `result.errors`，換下一個系所 | `crawl()` |
 | 單一學期 | 記進 `errors.json`，換下一個學期；連續 3 個學期全失敗才中止本批 | `main()` |
-| 整批 | 等 30 分鐘整批重來，最多 3～5 次 | 三支 workflow 的 `until` 迴圈 |
+| 整批 | 等 20～30 分鐘整批重來，最多 3～5 次 | `.github/retry.sh`（各 workflow 帶自己的次數與間隔） |
 
 **每抓完一個學期就 `write_outputs()` 一次**，不是等整批跑完才一起寫。
 一批 12 個學期跑到第 8 個掛掉，前 7 個的資料已經在磁碟上了。
@@ -361,8 +361,8 @@ runner 在美國，跨太平洋連學校主機，偶爾會整段路由抖掉。2
 10 門課）。
 
 修法是拿上一輪的 `<學期>/classes.json` 當底，單位頁沒列到的班級照樣去抓。
-**四支 workflow 的還原步驟都要有 `*/classes.json`**——`read_class_groups()`
-讀不到就回空 dict、一切照舊，所以漏掉不會有任何測試失敗，假停開會直接回來。
+**還原步驟（`.github/actions/restore-gh-pages`，四支 workflow 共用）預設就撈 `*/classes.json`，覆寫 `semester-files` 時不能漏掉它**——`read_class_groups()`
+讀不到就回空 dict、一切照舊，爬蟲本身的測試抓不到，只有 `tests/test_workflow_schedule.py` 守著；漏掉的話假停開會直接回來。
 
 > 這類 bug 當年在事件流上留下過假停開與假加開，是用一次性腳本
 > （`drop_phantom_additions.py`、`drop_phantom_removals.py`、`rebuild_changes.py`）

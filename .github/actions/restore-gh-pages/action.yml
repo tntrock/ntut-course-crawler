@@ -1,0 +1,46 @@
+name: Restore shared index files
+description: 從 gh-pages 撈回根目錄的 JSON 與各學期指定的檔案到 data/(不是整包,理由見 restore-note.md)
+
+inputs:
+  semester-files:
+    description: 每個學期目錄底下要撈回的檔名,空白分隔
+    default: classes.json
+
+runs:
+  using: composite
+  steps:
+    # 根目錄的 JSON 全部撈回來:capacity.json 漏了會用空值蓋掉全站教室容量,
+    # 其他幾個是狀態檔與事件流,漏了一樣會被這一輪的空版本蓋掉。
+    #
+    # 各學期的 classes.json 是「單位頁少列班級」的唯一防線:crawl() 拿它
+    # 補上單位頁偶發少列的班級。少列不會產生任何錯誤(頁面回 200、解析成功,
+    # 只是內容變少),那個班級底下的課會安靜消失並被記成「停開」——
+    # 2026-09-07 09:47 線上就這樣冒出 10 筆假停開。讀不到檔案時
+    # read_class_groups() 回空 dict、一切照舊,所以漏掉不會有任何測試失敗。
+    - shell: bash
+      env:
+        SEMESTER_FILES: ${{ inputs.semester-files }}
+      run: |
+        shopt -s nullglob
+        mkdir -p data
+        if ! git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
+          echo "gh-pages 還不存在(第一次跑),從零開始"
+          exit 0
+        fi
+        patterns=('/*.json')
+        for name in $SEMESTER_FILES; do patterns+=("*/$name"); done
+        git -C .gh-pages sparse-checkout set --no-cone "${patterns[@]}"
+        for path in .gh-pages/*.json; do
+          cp "$path" data/
+          echo "已還原 ${path#.gh-pages/}($(stat -c%s "$path") bytes)"
+        done
+        for name in $SEMESTER_FILES; do
+          found=0
+          while IFS= read -r -d '' path; do
+            rel="${path#.gh-pages/}"
+            mkdir -p "data/$(dirname "$rel")"
+            cp "$path" "data/$rel"
+            found=$((found + 1))
+          done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name "$name" -print0)
+          echo "已還原 $found 個學期的 $name"
+        done

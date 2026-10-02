@@ -101,32 +101,7 @@ jobs:
       # syllabus.json 則是「哪些學期的大綱補完了」的唯一依據 ——
       # 沒有它們,每一批都會從頭再抓一次。
       - name: Restore shared index files
-        run: |
-          mkdir -p data
-          if git clone --depth 1 --branch gh-pages --filter=blob:none --sparse --quiet "https://github.com/${GITHUB_REPOSITORY}.git" .gh-pages; then
-            git -C .gh-pages sparse-checkout set --no-cone '/*.json' '*/classes.json'
-            for f in meta.json index.json errors.json changes.json enrollment.json syllabus.json capacity.json runs.json; do
-              if [ -f ".gh-pages/$f" ]; then
-                cp ".gh-pages/$f" "data/$f"
-                echo "已還原 $f($(stat -c%s "data/$f") bytes)"
-              else
-                echo "gh-pages 上還沒有 $f"
-              fi
-            done
-            # 每個學期的 classes.json:crawl() 拿它補上單位頁偶發少列的班級。
-            # 少列不會產生任何錯誤,那個班級底下的課會安靜消失並被記成「停開」。
-            # 拿掉這一段不會有測試失敗,只是假停開會回來。
-            found=0
-            while IFS= read -r -d '' path; do
-              rel="${path#.gh-pages/}"
-              mkdir -p "data/$(dirname "$rel")"
-              cp "$path" "data/$rel"
-              found=$((found + 1))
-            done < <(find .gh-pages -mindepth 2 -maxdepth 2 -name classes.json -print0)
-            echo "已還原 $found 個學期的 classes.json"
-          else
-            echo "gh-pages 還不存在,從零開始"
-          fi
+        uses: ./.github/actions/restore-gh-pages
 
       - name: Show what is already done
         run: |
@@ -217,21 +192,7 @@ jobs:
             args+=(--with-syllabus)
           fi
 
-          attempt=1
-          until python -m crawler.main "${args[@]}"; do
-            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-              echo "::error::連續 $attempt 次失敗,放棄本批(已補完的學期會發布出去,再按一次就接續)"
-              echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
-              exit 1
-            fi
-            echo "::warning::第 $attempt 次失敗,等 $((RETRY_WAIT_SECONDS / 60)) 分鐘後整批重來"
-            sleep "$RETRY_WAIT_SECONDS"
-            attempt=$((attempt + 1))
-          done
-
-          # 給 Record this run 用:「一次就過」和「重試三次才過」對狀態頁
-          # 是兩回事。放棄的那條路徑在上面也寫了一次。
-          echo "CRAWL_ATTEMPTS=$attempt" >> "$GITHUB_ENV"
+          .github/retry.sh "$MAX_ATTEMPTS" "$RETRY_WAIT_SECONDS" python -m crawler.main "${args[@]}"
 
 
       # 不論成功、失敗、還是 job 逾時被砍,都留下一筆執行紀錄。
