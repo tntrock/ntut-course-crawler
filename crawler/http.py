@@ -310,29 +310,3 @@ class Fetcher:
                 "已經抓好的資料不受影響,下次執行會重來。",
                 self.consecutive_failures,
             )
-
-
-# --------------------------------------------------------------------------
-# 模組層預設實例。小型腳本可直接 `from crawler.http import fetch`。
-# main.py 則自行建立 Fetcher 以套用 CLI 參數。
-# --------------------------------------------------------------------------
-_default: Fetcher | None = None
-
-
-def get_fetcher() -> Fetcher:
-    global _default
-    if _default is None:
-        _default = Fetcher()
-    return _default
-
-
-def configure(**kwargs) -> Fetcher:
-    """重建模組層預設 Fetcher(參數同 Fetcher.__init__)。"""
-    global _default
-    _default = Fetcher(**kwargs)
-    return _default
-
-
-def fetch(url: str, *, params: dict | None = None) -> str:
-    """回傳已正確解碼的 HTML 字串。"""
-    return get_fetcher().fetch(url, params=params)

@@ -1033,8 +1033,6 @@ crawler/
   runlog.py         # CLI:把一次 workflow 執行的結果記進 runs.json
 
 tests/              # 全離線,對 tests/fixtures/ 的真實 HTML 樣本斷言
-scripts/            # 一次性腳本,不參與正式流程:偵察(recon*.py)與
-                    # 修補線上資料(drop_phantom_*.py、rebuild_changes.py)
 .github/workflows/  # crawl(每 4 小時)、syllabus(一天兩班)、
                     # capacity(每月一次,教室容量)、backfill(手動回補)、
                     # test(每次 push)
