@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .periods import DAY_NAMES
@@ -92,36 +92,17 @@ class Course:
     programs: list[str] = field(default_factory=list)  # 跨領域學程 / 微學程
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name_zh": self.name_zh,
-            "name_en": self.name_en,
-            "stage": self.stage,
-            "credits": self.credits,
-            "hours": self.hours,
-            "required": self.required,
-            "requirement_type": self.requirement_type,
-            "teachers": list(self.teachers),
-            "teacher_codes": list(self.teacher_codes),
-            "classes": list(self.classes),
-            "class_ids": list(self.class_ids),
-            "department_ids": list(self.department_ids),
-            "time_slots": [slot.to_dict() for slot in self.time_slots],
-            "classrooms": list(self.classrooms),
-            "classroom_codes": list(self.classroom_codes),
-            "enrolled": self.enrolled,
-            # `quota` 是 `enrolled` 的舊名,語意上一直是修課人數而不是名額上限。
-            # 名字會誤導拿它算比率的人(以為分母是容量),所以改名;舊欄位保留
-            # 不刪 —— README 的相容性承諾是「只新增、不改既有欄位」。
-            "quota": self.enrolled,
-            "withdrawn": self.withdrawn,
-            "language": self.language,
-            "syllabus_url": self.syllabus_url,
-            "notes": self.notes,
-            "audit": self.audit,
-            "lab": self.lab,
-            "programs": list(self.programs),
-        }
+        out: dict[str, Any] = {}
+        for key, value in asdict(self).items():
+            out[key] = value
+            if key == "enrolled":
+                # `quota` 是 `enrolled` 的舊名,語意上一直是修課人數而不是名額上限。
+                # 名字會誤導拿它算比率的人(以為分母是容量),所以改名;舊欄位保留
+                # 不刪 —— README 的相容性承諾是「只新增、不改既有欄位」。
+                out["quota"] = value
+        # asdict 只看欄位,TimeSlot 的 day_name 是 property,要走它自己的 to_dict。
+        out["time_slots"] = [slot.to_dict() for slot in self.time_slots]
+        return out
 
     def merge_from(self, other: "Course") -> None:
         """把同課號的另一筆合併進來(合開課程會出現在多個班級頁)。
@@ -156,12 +137,7 @@ class Department:
     url: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "college": self.college,
-            "url": self.url,
-        }
+        return asdict(self)
 
 
 @dataclass
@@ -178,12 +154,7 @@ class ClassGroup:
     url: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "department_id": self.department_id,
-            "url": self.url,
-        }
+        return asdict(self)
 
 
 @dataclass(frozen=True, order=True)
