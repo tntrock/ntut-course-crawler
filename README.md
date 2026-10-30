@@ -1,6 +1,12 @@
 # ntut-course-crawler
 
-[![test](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml) [![crawl](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml)
+[![test](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/test.yml)
+[![crawl](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml/badge.svg)](https://github.com/tntrock/ntut-course-crawler/actions/workflows/crawl.yml)
+[![CodeQL](https://github.com/tntrock/ntut-course-crawler/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/tntrock/ntut-course-crawler/security/code-scanning)
+[![codecov](https://codecov.io/gh/tntrock/ntut-course-crawler/graph/badge.svg)](https://codecov.io/gh/tntrock/ntut-course-crawler)
+[![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/github/license/tntrock/ntut-course-crawler)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/tntrock/ntut-course-crawler)](https://github.com/tntrock/ntut-course-crawler/commits/main)
 
 國立臺北科技大學課程資料的**非官方**靜態 API。
 
