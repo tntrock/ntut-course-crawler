@@ -27,7 +27,7 @@ jobs:
       - run: pytest -q --cov=crawler --cov-report=xml
 
       # fork 來的 PR 拿不到 OIDC token,上傳失敗不該讓測試變紅。
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
           files: coverage.xml
